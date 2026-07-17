@@ -1,0 +1,149 @@
+diff --git a/util/thread_priority.cpp b/util/thread_priority.cpp
+index 227cb545..c4004226 100644
+--- a/util/thread_priority.cpp
++++ b/util/thread_priority.cpp
+@@ -27,6 +27,9 @@
+ #include <pthread.h>
+ #elif defined(_WIN32)
+ #include <windows.h>
++#elif defined(__APPLE__)
++#include <pthread.h>
++#include <sys/qos.h>
+ #endif
+ 
+ namespace Util
+@@ -59,6 +62,25 @@ void set_current_thread_priority(ThreadPriority priority)
+ 		if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
+ 			LOGE("Failed to set high thread priority.\n");
+ 	}
++#elif defined(__APPLE__)
++	qos_class_t mac_priority;
++
++	switch (priority)
++	{
++	case ThreadPriority::Low:
++		mac_priority = QOS_CLASS_UTILITY;
++		break;
++	case ThreadPriority::High:
++		mac_priority = QOS_CLASS_USER_INITIATED;
++		break;
++	case ThreadPriority::Default:
++	default:
++		mac_priority = QOS_CLASS_DEFAULT;
++		break;
++	}
++
++	// https://github.com/apple/darwin-libpthread/blob/main/include/sys/qos.h
++	pthread_set_qos_class_self_np(mac_priority, 0);
+ #else
+ #warning "Unimplemented set_current_thread_priority."
+ 	(void)priority;
+diff --git a/util/timer.cpp b/util/timer.cpp
+index a1408352..73138ac6 100644
+--- a/util/timer.cpp
++++ b/util/timer.cpp
+@@ -27,14 +27,47 @@
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+ #else
+-#include <time.h>
+ #include <errno.h>
++#include <time.h>
++
++#ifdef __APPLE__
++#include <mach/mach_time.h>
++#endif
+ #endif
+ 
+ #ifdef __SSE2__
+ #include <emmintrin.h>
+ #endif
+ 
++#ifdef __APPLE__
++struct MachTimebase
++{
++	MachTimebase()
++	{
++		mach_timebase_info(&info);
++	}
++
++	uint64_t ticks_to_nsecs(uint64_t ticks) const
++	{
++		return static_cast<uint64_t>(
++			(static_cast<unsigned __int128>(ticks) * info.numer) /
++			info.denom);
++	}
++
++	uint64_t nsecs_to_ticks(uint64_t nsecs) const
++	{
++		// Round up so mach_wait_until() does not wake before the requested
++		// nanosecond deadline due to integer truncation.
++		return static_cast<uint64_t>(
++			(static_cast<unsigned __int128>(nsecs) * info.denom +
++			 info.numer - 1) /
++			info.numer);
++	}
++
++	mach_timebase_info_data_t info = {};
++} static static_mach_timebase;
++#endif
++
+ namespace Util
+ {
+ FrameTimer::FrameTimer()
+@@ -111,6 +144,9 @@ int64_t get_current_time_nsecs()
+ 	if (!QueryPerformanceCounter(&li))
+ 		return 0;
+ 	return int64_t(double(li.QuadPart) * static_qpc_freq.inv_freq);
++#elif defined(__APPLE__)
++	return static_cast<int64_t>(
++		static_mach_timebase.ticks_to_nsecs(mach_absolute_time()));
+ #else
+ 	struct timespec ts = {};
+ 	constexpr auto timebase = CLOCK_MONOTONIC;
+@@ -124,12 +160,12 @@ void sleep_until_nsecs(int64_t timepoint)
+ {
+ #ifdef _WIN32
+ 	// Somewhat naive path. Improve this later.
+-	int64_t d = get_current_time_nsecs() - timepoint;
++	int64_t d = timepoint - get_current_time_nsecs();
+ 	if (d <= 0)
+ 		return;
+ 
+ 	// Assumes timer resolution has been set.
+-	Sleep(d / 1000000);
++	Sleep(static_cast<DWORD>(d / 1000000));
+ 
+ 	// Spin the rest of the way.
+ 	while (get_current_time_nsecs() < timepoint)
+@@ -138,14 +174,29 @@ void sleep_until_nsecs(int64_t timepoint)
+ 		_mm_pause();
+ #endif
+ 	}
++#elif defined(__APPLE__)
++	if (timepoint <= 0)
++		return;
++
++	const uint64_t deadline =
++		static_mach_timebase.nsecs_to_ticks(static_cast<uint64_t>(timepoint));
++
++	mach_wait_until(deadline);
+ #else
+ 	constexpr auto timebase = CLOCK_MONOTONIC;
+ 	struct timespec ts = {};
+ 	ts.tv_sec = timepoint / 1000000000ll;
+ 	ts.tv_nsec = timepoint % 1000000000ll;
++
+ 	// Linux does not support clock_nanosleep with MONOTONIC_RAW :(
+ 	int ret;
+-	while ((ret = clock_nanosleep(timebase, TIMER_ABSTIME, &ts, nullptr)) == EINTR) {}
++	while ((ret = clock_nanosleep(
++		        timebase,
++		        TIMER_ABSTIME,
++		        &ts,
++		        nullptr)) == EINTR)
++	{
++	}
+ #endif
+ }
+ 

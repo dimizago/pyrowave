@@ -14,6 +14,8 @@ else
 	git checkout $GRANITE_COMMIT
 fi
 
+patch -p1 < ../Granite-macos.patch
+
 cd ..
 
 update() {
