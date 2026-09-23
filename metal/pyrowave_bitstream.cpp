@@ -91,6 +91,9 @@ bool BlockLayout::init(int width_, int height_, ChromaSubsampling chroma_)
 				accumulate_block_mapping(blocks_x_8x8, blocks_y_8x8);
 			}
 		}
+
+		if (level == DecompositionLevels - 2)
+			coarse_block_end_32x32 = block_count_32x32;
 	}
 
 	return true;
@@ -110,6 +113,7 @@ void BitstreamParser::clear()
 	decoded_blocks = 0;
 	last_seq = UINT32_MAX;
 	decoded_frame_for_current_sequence = false;
+	saw_block_beyond_coarse = false;
 	total_blocks_in_sequence = layout->block_count_32x32;
 	payload_data_cpu.clear();
 }
@@ -142,7 +146,7 @@ bool BitstreamParser::decode_packet(const BitstreamHeader *header)
 	return true;
 }
 
-bool BitstreamParser::push_packet(const void *data_, size_t size)
+bool BitstreamParser::push_packet(const void *data_, size_t size, bool allow_truncated)
 {
 	auto *data = static_cast<const uint8_t *>(data_);
 	while (size >= sizeof(BitstreamHeader))
@@ -205,6 +209,17 @@ bool BitstreamParser::push_packet(const void *data_, size_t size)
 
 		if (packet_size > size)
 		{
+			if (allow_truncated)
+			{
+				// Even the cut-off packet's header is evidence for the prefix readiness
+				// rule, since packets arrive in ascending block index order.
+				if (last_seq != UINT32_MAX && ((header->sequence - last_seq) & SequenceCountMask) == 0 &&
+				    header->block_index < uint32_t(layout->block_count_32x32) &&
+				    header->block_index >= uint32_t(layout->coarse_block_end_32x32))
+					saw_block_beyond_coarse = true;
+				return true;
+			}
+
 			PYROWAVE_LOGE("Packet header states %zu bytes, but only %zu bytes left to parse.\n", packet_size, size);
 			return false;
 		}
@@ -238,6 +253,9 @@ bool BitstreamParser::push_packet(const void *data_, size_t size)
 			return false;
 		}
 
+		if (header->block_index >= uint32_t(layout->coarse_block_end_32x32))
+			saw_block_beyond_coarse = true;
+
 		if (!decode_packet(header))
 			return false;
 
@@ -245,7 +263,7 @@ bool BitstreamParser::push_packet(const void *data_, size_t size)
 		size -= packet_size;
 	}
 
-	if (size != 0)
+	if (size != 0 && !allow_truncated)
 	{
 		PYROWAVE_LOGE("Did not consume packet completely.\n");
 		return false;
@@ -327,6 +345,17 @@ bool BitstreamParser::decode_is_ready(bool allow_partial_frame, int num_pristine
 		if (float(decoded_blocks) <= float(total_blocks_in_sequence) * minimum_packet_ratio)
 			return false;
 	}
+
+	return true;
+}
+
+bool BitstreamParser::decode_is_ready_prefix(bool allow_partial_frame) const
+{
+	if (decoded_frame_for_current_sequence || last_seq == UINT32_MAX)
+		return false;
+
+	if (decoded_blocks < total_blocks_in_sequence)
+		return allow_partial_frame && saw_block_beyond_coarse;
 
 	return true;
 }

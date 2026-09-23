@@ -135,6 +135,9 @@ struct BlockLayout
 
 	int block_count_8x8 = 0;
 	int block_count_32x32 = 0;
+	// First 32x32 block index finer than decomposition level 3. Blocks [0, this) are
+	// the coarse levels 4 and 3, whose loss is catastrophic rather than blurry.
+	int coarse_block_end_32x32 = 0;
 
 	int width = 0;
 	int height = 0;
@@ -162,7 +165,10 @@ public:
 
 	void clear();
 
-	bool push_packet(const void *data, size_t size);
+	// allow_truncated: the buffer is known to be cut short (e.g. the tail of a
+	// network frame was lost), so running out of data mid-packet is expected rather
+	// than an error; whole packets ahead of the cut are still decoded.
+	bool push_packet(const void *data, size_t size, bool allow_truncated = false);
 
 	bool decode_is_ready(bool allow_partial_frame) const;
 
@@ -174,6 +180,14 @@ public:
 	// If the pointer is null, it is implied that all blocks are active for purposes of this call.
 	bool decode_is_ready(bool allow_partial_frame, int num_pristine_bands, float minimum_packet_ratio,
 	                     const uint32_t *active_block_mask, size_t word_count) const;
+
+	// Readiness rule for frames that arrive as a byte prefix of the packet stream
+	// (tail lost): a partial frame is accepted as soon as any packet of it started
+	// past the coarse levels. packetize() emits blocks in ascending index order, so
+	// that proves every transmitted coarse block arrived, and the image degrades to
+	// blur, never to garbage. Much more permissive than decode_is_ready()'s ratio
+	// rule, which rejects most prefix-truncated frames.
+	bool decode_is_ready_prefix(bool allow_partial_frame) const;
 
 	// Call once a frame has actually been submitted for decode, so the same
 	// sequence is not decoded twice.
@@ -199,6 +213,7 @@ private:
 	int total_blocks_in_sequence = 0;
 	uint32_t last_seq = UINT32_MAX;
 	bool decoded_frame_for_current_sequence = false;
+	bool saw_block_beyond_coarse = false;
 
 	bool decode_packet(const BitstreamHeader *header);
 	bool has_pristine_bands(int bands, const uint32_t *active_block_mask, size_t word_count) const;
