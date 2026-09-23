@@ -25,6 +25,8 @@
 #include <cmath>
 #include <memory>
 #include <new>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
@@ -268,6 +270,11 @@ struct pyrowave_d3d12_encoder_opaque
 	ComPtr<ID3D12QueryHeap> timestamps;
 	ComPtr<ID3D12Resource> timestamp_readback;
 	UINT64 timestamp_frequency = 0;
+	// PYROWAVE_D3D12_PROFILE=1: a timestamp after every stage, logged after each encode.
+	bool profile = false;
+	UINT num_stage_marks = 0;
+	const char *stage_names[16] = {};
+	bool profile_pending = false;
 
 	uint32_t sequence_count = 0;
 
@@ -633,9 +640,11 @@ bool create_encode_resources(pyrowave_d3d12_encoder encoder)
 	// GPU timing is best effort.
 	D3D12_QUERY_HEAP_DESC qh = {};
 	qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-	qh.Count = 2;
+	qh.Count = 16;
+	const char *profile_env = getenv("PYROWAVE_D3D12_PROFILE");
+	encoder->profile = profile_env && profile_env[0] == '1';
 	if (FAILED(dev->CreateQueryHeap(&qh, __uuidof(ID3D12QueryHeap), encoder->timestamps.ppv())) ||
-	    !(encoder->timestamp_readback = create_buffer(device, D3D12_HEAP_TYPE_READBACK, 16, D3D12_RESOURCE_FLAG_NONE,
+	    !(encoder->timestamp_readback = create_buffer(device, D3D12_HEAP_TYPE_READBACK, 16 * sizeof(UINT64), D3D12_RESOURCE_FLAG_NONE,
 	                                                  D3D12_RESOURCE_STATE_COPY_DEST, L"pyrowave timestamps")) ||
 	    FAILED(encoder->queue->GetTimestampFrequency(&encoder->timestamp_frequency)))
 	{
@@ -920,6 +929,39 @@ void wait_previous(pyrowave_d3d12_encoder encoder)
 	encoder->wait_idle();
 }
 
+// Profiling: timestamp index 0 is the start of the encode, 1 the end, 2.. stage ends.
+void mark_stage(pyrowave_d3d12_encoder encoder, const char *name)
+{
+	if (!encoder->profile || !encoder->timestamps || encoder->num_stage_marks >= 14)
+		return;
+	encoder->stage_names[encoder->num_stage_marks] = name;
+	encoder->list->EndQuery(encoder->timestamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 + encoder->num_stage_marks++);
+}
+
+void log_profile(pyrowave_d3d12_encoder encoder)
+{
+	if (!encoder->profile_pending)
+		return;
+	encoder->profile_pending = false;
+	UINT64 *ts = nullptr;
+	D3D12_RANGE range = { 0, 16 * sizeof(UINT64) };
+	if (FAILED(encoder->timestamp_readback->Map(0, &range, reinterpret_cast<void **>(&ts))))
+		return;
+	char line[512];
+	int len = snprintf(line, sizeof(line), "profile total %.3f ms:",
+	                   double(ts[1] - ts[0]) * 1000.0 / double(encoder->timestamp_frequency));
+	UINT64 prev = ts[0];
+	for (UINT i = 0; i < encoder->num_stage_marks && len < int(sizeof(line)); i++)
+	{
+		len += snprintf(line + len, sizeof(line) - len, " %s %.3f", encoder->stage_names[i],
+		                double(ts[2 + i] - prev) * 1000.0 / double(encoder->timestamp_frequency));
+		prev = ts[2 + i];
+	}
+	D3D12_RANGE none = { 0, 0 };
+	encoder->timestamp_readback->Unmap(0, &none);
+	encoder->device->log("%s", line);
+}
+
 pyrowave_d3d12_result encode_frame(pyrowave_d3d12_encoder encoder, const pyrowave_d3d12_rate_control *rate_control,
                                    ID3D12Fence *wait_fence, uint64_t wait_value, ID3D12Fence *signal_fence,
                                    uint64_t signal_value, bool cpu_input_recorded)
@@ -964,21 +1006,29 @@ pyrowave_d3d12_result encode_frame(pyrowave_d3d12_encoder encoder, const pyrowav
 	clear_buffer(encoder, ClearQuant, BufferQuant);
 	clear_buffer(encoder, ClearBitstream, BufferBitstream);
 	uav_barrier(list);
+	encoder->num_stage_marks = 0;
+	mark_stage(encoder, "clear");
 
 	dispatch_dwt(encoder);
+	mark_stage(encoder, "dwt");
 	dispatch_quant(encoder);
 	// Rate control analysis reads the per block statistics and payload sizes.
 	uav_barrier(list);
+	mark_stage(encoder, "quant");
 	dispatch_analyze_rdo(encoder);
 	uav_barrier(list);
+	mark_stage(encoder, "analyze");
 	dispatch_resolve_rdo(encoder, target_size);
 	// Packing needs the quant decisions resolve just made.
 	uav_barrier(list);
+	mark_stage(encoder, "resolve");
 	dispatch_block_packing(encoder);
 	uav_barrier(list);
+	mark_stage(encoder, "packing");
 
 	copy_result(encoder, BufferBitstreamMeta, encoder->meta_readback.get(), encoder->buffer_sizes[BufferBitstreamMeta]);
 	copy_result(encoder, BufferBitstream, encoder->bitstream_readback.get(), encoder->bitstream_result_size);
+	mark_stage(encoder, "readback");
 
 	for (int level = 0; level < DecompositionLevels; level++)
 		transition_pyramid_level(encoder, level, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -987,8 +1037,9 @@ pyrowave_d3d12_result encode_frame(pyrowave_d3d12_encoder encoder, const pyrowav
 	if (encoder->timestamps)
 	{
 		list->EndQuery(encoder->timestamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-		list->ResolveQueryData(encoder->timestamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+		list->ResolveQueryData(encoder->timestamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2 + encoder->num_stage_marks,
 		                       encoder->timestamp_readback.get(), 0);
+		encoder->profile_pending = encoder->profile;
 	}
 
 	if (FAILED(list->Close()))
@@ -1018,6 +1069,7 @@ pyrowave_d3d12_result wait_for_result(pyrowave_d3d12_encoder encoder)
 	}
 
 	encoder->wait_idle();
+	log_profile(encoder);
 	HRESULT removed = encoder->device->dev->GetDeviceRemovedReason();
 	if (FAILED(removed))
 	{
