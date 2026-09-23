@@ -13,7 +13,12 @@
 // the last sign byte of a block, as documented in the Vulkan and Metal encoders);
 // decoded output is.
 //
+// --bytes N encodes at one fixed budget instead of the two bits-per-pixel rates (the
+// Vulkan pyrowave-bench uses 500000), and --y4m DIR writes the synthetic frames as
+// .y4m files that pyrowave-bench can read, for an apples-to-apples timing comparison.
+//
 // Usage: pyrowave-d3d12-encode-compare [--precision N] [--debug | --gbv] [--iterations N]
+//                                      [--bytes N] [--y4m DIR]
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -239,6 +244,19 @@ int max_diff(const Planes &a, const Planes &b)
 	return worst;
 }
 
+bool write_y4m(const std::string &path, const Planes &p, bool chroma_444)
+{
+	FILE *f = fopen(path.c_str(), "wb");
+	if (!f)
+		return false;
+	fprintf(f, "YUV4MPEG2 W%d H%d F60:1 Ip A1:1 C%s\nFRAME\n", p.width[0], p.height[0],
+	        chroma_444 ? "444" : "420jpeg");
+	bool ok = true;
+	for (auto &plane : p.data)
+		ok = ok && fwrite(plane.data(), 1, plane.size(), f) == plane.size();
+	return fclose(f) == 0 && ok;
+}
+
 size_t report_debug_layer(Context &ctx)
 {
 	size_t issues = 0;
@@ -267,9 +285,13 @@ size_t report_debug_layer(Context &ctx)
 
 int main(int argc, char **argv)
 {
+	// Unbuffered, so rows interleave correctly with the library's stderr logging.
+	setvbuf(stdout, nullptr, _IONBF, 0);
 	int precision = 2;
 	int iterations = 10;
 	bool debug = false, gpu_validation = false;
+	size_t fixed_bytes = 0;
+	std::string y4m_dir;
 	for (int i = 1; i < argc; i++)
 	{
 		if (!strcmp(argv[i], "--precision") && i + 1 < argc)
@@ -280,6 +302,10 @@ int main(int argc, char **argv)
 			debug = true;
 		else if (!strcmp(argv[i], "--gbv"))
 			debug = gpu_validation = true;
+		else if (!strcmp(argv[i], "--bytes") && i + 1 < argc)
+			fixed_bytes = size_t(atoll(argv[++i]));
+		else if (!strcmp(argv[i], "--y4m") && i + 1 < argc)
+			y4m_dir = argv[++i];
 	}
 
 	char env[32];
@@ -319,6 +345,14 @@ int main(int argc, char **argv)
 	for (auto &tc : test_cases)
 	{
 		Planes source = make_test_image(tc.width, tc.height, tc.chroma_444);
+		if (!y4m_dir.empty())
+		{
+			char path[512];
+			snprintf(path, sizeof(path), "%s\\%dx%d_%s.y4m", y4m_dir.c_str(), tc.width, tc.height,
+			         tc.chroma_444 ? "444" : "420");
+			if (!write_y4m(path, source, tc.chroma_444))
+				fprintf(stderr, "Failed to write %s\n", path);
+		}
 		ComPtr<ID3D12Resource> textures[3];
 		if (!upload_planes(ctx, source, textures))
 		{
@@ -339,9 +373,12 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		for (double bpp : rates)
+		std::vector<double> run_rates(std::begin(rates), std::end(rates));
+		if (fixed_bytes)
+			run_rates = { double(fixed_bytes) * 8.0 / (double(tc.width) * tc.height) };
+		for (double bpp : run_rates)
 		{
-			const size_t target = size_t(double(tc.width) * tc.height * bpp / 8.0);
+			const size_t target = fixed_bytes ? fixed_bytes : size_t(double(tc.width) * tc.height * bpp / 8.0);
 			char name[32];
 			snprintf(name, sizeof(name), "%dx%d_%s", tc.width, tc.height, tc.chroma_444 ? "444" : "420");
 
