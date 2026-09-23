@@ -214,3 +214,11 @@ if (PYROWAVE_DEVEL AND WIN32)
     target_link_libraries(pyrowave-encode-desktop PRIVATE pyrowave-shared dxgi d3d11 pyrowave-utils)
 endif()
 
+
+# Native Direct3D 12 backend (no Granite/Vulkan), see d3d12/.
+if (WIN32)
+    option(PYROWAVE_D3D12 "Build the Direct3D 12 backend in d3d12/." ON)
+    if (PYROWAVE_D3D12)
+        add_subdirectory(d3d12)
+    endif()
+endif()
