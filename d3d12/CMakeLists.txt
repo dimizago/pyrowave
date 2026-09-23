@@ -39,4 +39,9 @@ if (TARGET pyrowave-shared)
     add_executable(pyrowave-d3d12-decode-compare test/decode_compare.cpp)
     target_link_libraries(pyrowave-d3d12-decode-compare PRIVATE pyrowave-d3d12-test-harness pyrowave-shared granite-volk-headers)
     target_include_directories(pyrowave-d3d12-decode-compare PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+    # Encodes with both backends and cross-decodes.
+    add_executable(pyrowave-d3d12-encode-compare test/encode_compare.cpp)
+    target_link_libraries(pyrowave-d3d12-encode-compare PRIVATE pyrowave-d3d12-test-harness pyrowave-shared granite-volk-headers)
+    target_include_directories(pyrowave-d3d12-encode-compare PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 endif()
