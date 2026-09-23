@@ -11,6 +11,7 @@
 #include "../com_ptr.hpp"
 #include "../metal/pyrowave_bitstream.hpp"
 
+#include <mutex>
 #include <stdint.h>
 
 namespace PyroWave
@@ -41,6 +42,27 @@ enum RootParameter : UINT
 };
 constexpr UINT RootConstantCount = 8;
 
+// Encoder root signature (one layout, two variants differing only in the static
+// sampler at s0): b0 root constants, t0 the one sampled texture, u0..u5 buffers or
+// the DWT's output image. Every storage buffer is a UAV (transpile.py forces it), so
+// buffers never change state and stage boundaries are UAV barriers.
+enum EncoderRootParameter : UINT
+{
+	EncRootConstants = 0,
+	EncRootTableT0 = 1,
+	EncRootTableU0 = 2, // u0..u5 at EncRootTableU0 + n
+	EncRootParameterCount = EncRootTableU0 + 6
+};
+constexpr UINT EncRootConstantCount = 16;
+
+constexpr uint32_t DwtThreadgroupSize = 64;
+constexpr uint32_t QuantThreadgroupSize = 128;
+constexpr uint32_t AnalyzeThreadgroupSize = 64;
+constexpr uint32_t AnalyzeFinalizeThreadgroupSize = 512;
+constexpr uint32_t BlockPackingThreadgroupSize = 64;
+// resolve_rate_control's workgroup is exactly one wave, pinned to 64 lanes.
+constexpr uint32_t ResolveThreadgroupSize = 64;
+
 constexpr int DefaultPrecision = 1;
 int requested_precision();
 DXGI_FORMAT wavelet_format(int precision);
@@ -56,6 +78,18 @@ struct pyrowave_d3d12_device_opaque
 	ComPtr<ID3D12PipelineState> dequant_pipeline;
 	// Indexed by the DCShift constant.
 	ComPtr<ID3D12PipelineState> idwt_pipeline[2];
+
+	// Encoder. Created on demand by the first encoder, so decode-only users do not pay
+	// for them. [0] mirror-repeat sampler (DWT), [1] transparent border (quantizer).
+	ComPtr<ID3D12RootSignature> encoder_root_signature[2];
+	ComPtr<ID3D12PipelineState> dwt_pipeline[2]; // indexed by DCShift
+	ComPtr<ID3D12PipelineState> quant_pipeline;
+	ComPtr<ID3D12PipelineState> analyze_pipeline;
+	ComPtr<ID3D12PipelineState> analyze_finalize_pipeline;
+	ComPtr<ID3D12PipelineState> resolve_pipeline;
+	ComPtr<ID3D12PipelineState> block_packing_pipeline;
+	bool encode_pipelines_ready = false;
+	std::mutex encode_pipeline_lock;
 
 	pyrowave_d3d12_message_cb message_cb = nullptr;
 	void *message_userdata = nullptr;

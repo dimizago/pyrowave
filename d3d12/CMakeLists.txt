@@ -14,6 +14,7 @@ add_library(pyrowave-d3d12 STATIC
         pyrowave_d3d12_internal.hpp
         pyrowave_d3d12_device.cpp
         pyrowave_d3d12_decoder.cpp
+        pyrowave_d3d12_encoder.cpp
         ../metal/pyrowave_bitstream.cpp ../metal/pyrowave_bitstream.hpp
         shaders/generated/pyrowave_dxil.h)
 target_include_directories(pyrowave-d3d12 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

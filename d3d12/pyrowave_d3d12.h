@@ -14,7 +14,8 @@
 // Entry points are prefixed pyrowave_d3d12_ so this library can be linked into the
 // same binary as the Vulkan library (pyrowave.h), e.g. for comparison testing.
 //
-// Status: decoder only. The encoder is not ported yet.
+// The encoder additionally needs Shader Model 6.6 with native 16-bit types and a
+// 64-wide wave size (any recent desktop GPU); it is meant for the streaming host.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,6 +62,7 @@ typedef enum pyrowave_d3d12_chroma_subsampling
 
 typedef struct pyrowave_d3d12_device_opaque *pyrowave_d3d12_device;
 typedef struct pyrowave_d3d12_decoder_opaque *pyrowave_d3d12_decoder;
+typedef struct pyrowave_d3d12_encoder_opaque *pyrowave_d3d12_encoder;
 
 typedef void (*pyrowave_d3d12_message_cb)(void *userdata, const char *msg);
 
@@ -89,6 +91,10 @@ typedef struct pyrowave_d3d12_device_create_info
 PYROWAVE_D3D12_PUBLIC_API bool
 pyrowave_d3d12_device_is_supported(struct ID3D12Device *d3d12_device);
 
+// Reports whether a device can additionally run the encoder: Shader Model 6.6, native
+// 16-bit shader types and support for 64-wide waves.
+PYROWAVE_D3D12_PUBLIC_API bool
+pyrowave_d3d12_device_supports_encoder(struct ID3D12Device *d3d12_device);
 
 // Creates the root signature and pipelines, so create one and share it across decoders.
 //
@@ -199,6 +205,135 @@ pyrowave_d3d12_decoder_decode_gpu_buffer(pyrowave_d3d12_decoder decoder,
                                          const pyrowave_d3d12_gpu_buffers *buffers,
                                          struct ID3D12Fence *completion_fence,
                                          uint64_t completion_value);
+
+
+// Encoder API.
+//
+// Same model as the Metal port: the encoder owns a compute queue, an encode call
+// submits GPU work and returns without blocking, and the packet queries block until
+// that work has finished. Encoding again clobbers the previous frame's result. The
+// bitstream is identical in format to the Vulkan encoder's.
+
+typedef struct pyrowave_d3d12_encoder_create_info
+{
+	pyrowave_d3d12_device device;
+
+	// Luma dimensions. For 420 subsampling both must be even. Both in [1, 16384].
+	int width;
+	int height;
+
+	pyrowave_d3d12_chroma_subsampling chroma;
+} pyrowave_d3d12_encoder_create_info;
+
+typedef struct pyrowave_d3d12_packet
+{
+	size_t offset;
+	size_t size;
+} pyrowave_d3d12_packet;
+
+typedef struct pyrowave_d3d12_rate_control
+{
+	// The bitstream for an image will not exceed this size.
+	size_t maximum_bitstream_size;
+} pyrowave_d3d12_rate_control;
+
+typedef enum pyrowave_d3d12_cpu_buffer_format
+{
+	PYROWAVE_D3D12_CPU_BUFFER_FORMAT_NV12 = 0,    // 2 planes. Y in 8bpp, then CbCr interleaved in 16bpp.
+	PYROWAVE_D3D12_CPU_BUFFER_FORMAT_YUV420P = 1, // 3 planes, half resolution chroma.
+	PYROWAVE_D3D12_CPU_BUFFER_FORMAT_YUV444P = 2, // 3 planes, full resolution chroma.
+	PYROWAVE_D3D12_CPU_BUFFER_FORMAT_INT_MAX = 0x7fffffff
+} pyrowave_d3d12_cpu_buffer_format;
+
+typedef struct pyrowave_d3d12_cpu_buffer
+{
+	const void *data[3];
+	// Must be at least width for plane times texel size of the plane.
+	size_t row_stride_in_bytes[3];
+	// Must be at least row_stride times height of plane.
+	size_t plane_size_in_bytes[3];
+	// Size of the luma plane; must match the encoder.
+	int width;
+	int height;
+	pyrowave_d3d12_cpu_buffer_format format;
+} pyrowave_d3d12_cpu_buffer;
+
+// GPU input. Either:
+//   - three single-channel 2D textures in planes[0..2] (Y, Cb, Cr; chroma at half
+//     resolution for 420), any UNORM/FLOAT format the shader can sample (R8_UNORM,
+//     R16_UNORM, R16_FLOAT, ...), or
+//   - one planar DXGI_FORMAT_NV12 or DXGI_FORMAT_P010 texture in planes[0] with
+//     planes[1] and planes[2] NULL (420 only). Its chroma plane is sampled twice
+//     through swizzled views, so no deinterleave copy is needed.
+// The planes must be readable by compute shaders when the encode executes: in
+// D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE (or ALL_SHADER_RESOURCE), or in
+// COMMON when the resource allows implicit promotion (e.g. simultaneous access, or
+// shared with another API). They are only read.
+//
+// wait_fence / wait_value: if set, the encoder's queue waits on the GPU for the fence
+// to reach the value before reading the planes (e.g. a fence the capture side signals
+// once the frame is in place). signal_fence / signal_value: if set, signalled on the
+// encoder's queue once the encode, input reads included, has finished.
+typedef struct pyrowave_d3d12_encoder_gpu_input
+{
+	struct ID3D12Resource *planes[3];
+	struct ID3D12Fence *wait_fence;
+	uint64_t wait_value;
+	struct ID3D12Fence *signal_fence;
+	uint64_t signal_value;
+} pyrowave_d3d12_encoder_gpu_input;
+
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_create(const pyrowave_d3d12_encoder_create_info *info, pyrowave_d3d12_encoder *encoder);
+
+// Waits for any in-flight encode.
+PYROWAVE_D3D12_PUBLIC_API void
+pyrowave_d3d12_encoder_destroy(pyrowave_d3d12_encoder encoder);
+
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_encode_gpu(pyrowave_d3d12_encoder encoder, const pyrowave_d3d12_encoder_gpu_input *input,
+                                  const pyrowave_d3d12_rate_control *rate_control);
+
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_encode_cpu(pyrowave_d3d12_encoder encoder, const pyrowave_d3d12_cpu_buffer *input,
+                                  const pyrowave_d3d12_rate_control *rate_control);
+
+// Packet queries: only valid after a successful encode, and only for that frame.
+// They block until the GPU has finished it. Semantics match pyrowave.h.
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_compute_num_packets(pyrowave_d3d12_encoder encoder, size_t packet_boundary,
+                                           size_t *num_packets);
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_compute_num_packets_with_padding(pyrowave_d3d12_encoder encoder, size_t packet_boundary,
+                                                        size_t padding_size, size_t *num_packets);
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_compute_num_critical_packets(pyrowave_d3d12_encoder encoder, int bands,
+                                                    size_t packet_boundary, size_t padding_size,
+                                                    size_t *num_packets);
+
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_packetize(pyrowave_d3d12_encoder encoder, pyrowave_d3d12_packet *packets,
+                                 size_t packet_boundary, size_t *out_packets, void *bitstream, size_t size);
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_packetize_with_padding(pyrowave_d3d12_encoder encoder, pyrowave_d3d12_packet *packets,
+                                              size_t packet_boundary, size_t padding_size, size_t *out_packets,
+                                              void *bitstream, size_t size);
+
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_get_mapped_raw_bitstream(pyrowave_d3d12_encoder encoder,
+                                                const void **mapped_bitstream, size_t *mapped_bitstream_size,
+                                                const void **mapped_metadata, size_t *mapped_metadata_size);
+
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_get_num_active_blocks(pyrowave_d3d12_encoder encoder, int bands, size_t *num_active_blocks);
+
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_compute_block_active_words(pyrowave_d3d12_encoder encoder, int bands,
+                                                  uint32_t *words, size_t word_count);
+
+// GPU time of the last encode in milliseconds (blocks until it has finished).
+PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
+pyrowave_d3d12_encoder_get_last_gpu_time(pyrowave_d3d12_encoder encoder, double *milliseconds);
 
 #ifdef __cplusplus
 }

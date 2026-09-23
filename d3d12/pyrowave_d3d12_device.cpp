@@ -162,6 +162,26 @@ const char *pyrowave_d3d12_result_to_string(pyrowave_d3d12_result result)
 	}
 }
 
+bool pyrowave_d3d12_device_supports_encoder(ID3D12Device *d3d12_device)
+{
+	if (!pyrowave_d3d12_device_is_supported(d3d12_device))
+		return false;
+
+	D3D12_FEATURE_DATA_SHADER_MODEL sm = { D3D_SHADER_MODEL_6_6 };
+	if (FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))) ||
+	    sm.HighestShaderModel < D3D_SHADER_MODEL_6_6)
+		return false;
+
+	D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = {};
+	D3D12_FEATURE_DATA_D3D12_OPTIONS4 options4 = {};
+	if (FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1))) ||
+	    FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &options4, sizeof(options4))))
+		return false;
+
+	return options4.Native16BitShaderOpsSupported && options1.WaveLaneCountMin <= 64 &&
+	       options1.WaveLaneCountMax >= 64;
+}
+
 bool pyrowave_d3d12_device_is_supported(ID3D12Device *d3d12_device)
 {
 	if (!d3d12_device)
