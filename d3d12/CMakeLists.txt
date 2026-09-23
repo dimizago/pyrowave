@@ -20,3 +20,22 @@ target_include_directories(pyrowave-d3d12 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(pyrowave-d3d12 PRIVATE cxx_std_14)
 target_compile_definitions(pyrowave-d3d12 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(pyrowave-d3d12 PUBLIC d3d12)
+
+# Test harness shared by the tools below and the Xbox test app (test/uwp).
+add_library(pyrowave-d3d12-test-harness STATIC test/vector_test.cpp test/vector_test.hpp)
+target_link_libraries(pyrowave-d3d12-test-harness PUBLIC pyrowave-d3d12 dxgi)
+target_compile_definitions(pyrowave-d3d12-test-harness PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+
+# Replays dumped test vectors; needs no Vulkan.
+add_executable(pyrowave-d3d12-vector-test test/vector_test_main.cpp)
+target_link_libraries(pyrowave-d3d12-vector-test PRIVATE pyrowave-d3d12-test-harness)
+if (MINGW)
+    target_link_options(pyrowave-d3d12-vector-test PRIVATE -municode)
+endif()
+
+# Decodes the same Vulkan-encoded bitstreams with both backends and compares.
+if (TARGET pyrowave-shared)
+    add_executable(pyrowave-d3d12-decode-compare test/decode_compare.cpp)
+    target_link_libraries(pyrowave-d3d12-decode-compare PRIVATE pyrowave-d3d12-test-harness pyrowave-shared granite-volk-headers)
+    target_include_directories(pyrowave-d3d12-decode-compare PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+endif()
