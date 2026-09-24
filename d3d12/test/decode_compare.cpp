@@ -14,6 +14,7 @@
 // Xbox test app, or pyrowave-d3d12-vector-test, can replay without Vulkan.
 //
 // Usage: pyrowave-d3d12-decode-compare [--precision N] [--debug | --gbv] [--iterations N] [--dump DIR]
+//                                      [--bytes N] [--only WxH_444|WxH_420]
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -64,6 +65,9 @@ pyrowave_cpu_buffer as_cpu_buffer(Planes &p, bool chroma_444)
 	return buf;
 }
 
+// --bytes N: fixed bitstream budget instead of ~3 bits per luma pixel.
+static size_t g_bytes = 0;
+
 #define VK_CHECKED(x) do { pyrowave_result r_ = (x); if (r_ != PYROWAVE_SUCCESS) { \
 	fprintf(stderr, "%s failed: %d\n", #x, int(r_)); return false; } } while (0)
 
@@ -91,7 +95,7 @@ bool make_vector(pyrowave_device vk, const TestCase &tc, TestVector &vec, Planes
 	VK_CHECKED(pyrowave_encoder_create(&enc_info, &encoder));
 
 	pyrowave_rate_control rc = {};
-	rc.maximum_bitstream_size = size_t(tc.width) * tc.height * 3 / 8;
+	rc.maximum_bitstream_size = g_bytes ? g_bytes : size_t(tc.width) * tc.height * 3 / 8;
 	pyrowave_cpu_buffer src_buf = as_cpu_buffer(source, tc.chroma_444);
 	VK_CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &src_buf, &rc));
 
@@ -163,12 +167,17 @@ int main(int argc, char **argv)
 	int iterations = 20;
 	bool debug = false, gpu_validation = false;
 	std::wstring dump_dir;
+	const char *only = nullptr;
 	for (int i = 1; i < argc; i++)
 	{
 		if (!strcmp(argv[i], "--precision") && i + 1 < argc)
 			precision = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--iterations") && i + 1 < argc)
 			iterations = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--bytes") && i + 1 < argc)
+			g_bytes = size_t(atoll(argv[++i]));
+		else if (!strcmp(argv[i], "--only") && i + 1 < argc)
+			only = argv[++i];
 		else if (!strcmp(argv[i], "--debug"))
 			debug = true;
 		else if (!strcmp(argv[i], "--gbv"))
@@ -218,6 +227,11 @@ int main(int argc, char **argv)
 	static const char *names[3] = { "Y ", "Cb", "Cr" };
 	for (auto &tc : test_cases)
 	{
+		char tc_name[64];
+		snprintf(tc_name, sizeof(tc_name), "%dx%d_%s", tc.width, tc.height, tc.chroma_444 ? "444" : "420");
+		if (only && strcmp(only, tc_name) != 0)
+			continue;
+
 		TestVector vec;
 		Planes source, decoded;
 		DecodeStats stats;

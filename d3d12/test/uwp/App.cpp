@@ -9,6 +9,7 @@
 #include "vector_test.hpp"
 
 #include <fstream>
+#include <stdlib.h>
 #include <thread>
 
 #include <winrt/Windows.ApplicationModel.Activation.h>
@@ -104,6 +105,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
 		// UI thread free so the shell does not consider the app hung.
 		auto dispatcher = window.Dispatcher();
 		worker = std::thread([dispatcher, path]() {
+			_putenv("PYROWAVE_D3D12_PROFILE=1");
 			std::string report = run_tests();
 			OutputDebugStringA(report.c_str());
 			std::ofstream(path, std::ios::binary) << report;

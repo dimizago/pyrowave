@@ -16,6 +16,8 @@
 
 #include <memory>
 #include <new>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
@@ -59,12 +61,18 @@ constexpr UINT SlotDescriptorCount = SlotPayloadDescriptors + 3;
 // The dequant shader can read slightly past the end of the payload, so pad.
 constexpr UINT64 PayloadPadding = 16;
 
+// PYROWAVE_D3D12_PROFILE=1: timestamps around every stage, logged once the GPU is done.
+constexpr UINT ProfileMarksPerSlot = 16;
+
 struct UploadSlot
 {
 	ComPtr<ID3D12Resource> buffer;
 	UINT64 capacity = 0;
 	ComPtr<ID3D12Fence> fence;
 	UINT64 fence_value = 0;
+
+	UINT num_marks = 0;
+	const char *mark_names[ProfileMarksPerSlot] = {};
 };
 }
 
@@ -85,6 +93,11 @@ struct pyrowave_d3d12_decoder_opaque
 
 	UploadSlot slots[UploadSlotCount];
 	UINT next_slot = 0;
+
+	bool profile = false;
+	ComPtr<ID3D12QueryHeap> timestamps;
+	ComPtr<ID3D12Resource> timestamp_readback;
+	UINT64 timestamp_frequency = 0;
 
 	// Static descriptor indices.
 	UINT pyramid_uav(int component, int level) const { return (component * DecompositionLevels + level) * 3 + 0; }
@@ -128,6 +141,77 @@ struct pyrowave_d3d12_decoder_opaque
 
 namespace
 {
+void mark(pyrowave_d3d12_decoder decoder, ID3D12GraphicsCommandList *cmd, UINT slot_index, const char *name)
+{
+	auto &slot = decoder->slots[slot_index];
+	if (!decoder->timestamps || slot.num_marks >= ProfileMarksPerSlot)
+		return;
+	slot.mark_names[slot.num_marks] = name;
+	cmd->EndQuery(decoder->timestamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, slot_index * ProfileMarksPerSlot + slot.num_marks++);
+}
+
+// Called once the slot's fence has completed.
+void log_profile(pyrowave_d3d12_decoder decoder, UINT slot_index)
+{
+	auto &slot = decoder->slots[slot_index];
+	if (!decoder->timestamps || slot.num_marks < 2)
+		return;
+
+	const UINT64 *ts = nullptr;
+	D3D12_RANGE range = { slot_index * ProfileMarksPerSlot * sizeof(UINT64), (slot_index + 1) * ProfileMarksPerSlot * sizeof(UINT64) };
+	if (FAILED(decoder->timestamp_readback->Map(0, &range, (void **)&ts)))
+		return;
+	ts += slot_index * ProfileMarksPerSlot;
+
+	const double to_us = 1e6 / double(decoder->timestamp_frequency);
+	char line[768];
+	int len = snprintf(line, sizeof(line), "decode profile total %.1f us:", double(ts[slot.num_marks - 1] - ts[0]) * to_us);
+	for (UINT i = 1; i < slot.num_marks && len < int(sizeof(line)); i++)
+		len += snprintf(line + len, sizeof(line) - len, " %s %.1f", slot.mark_names[i], double(ts[i] - ts[i - 1]) * to_us);
+
+	D3D12_RANGE none = { 0, 0 };
+	decoder->timestamp_readback->Unmap(0, &none);
+	decoder->device->log("%s", line);
+	slot.num_marks = 0;
+}
+
+bool init_profiling(pyrowave_d3d12_decoder decoder)
+{
+	auto *dev = decoder->device->dev.get();
+
+	// The timestamp frequency is a queue property; a throwaway compute queue tells us.
+	D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+	queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+	ComPtr<ID3D12CommandQueue> queue;
+	if (FAILED(dev->CreateCommandQueue(&queue_desc, __uuidof(ID3D12CommandQueue), queue.ppv())) ||
+	    FAILED(queue->GetTimestampFrequency(&decoder->timestamp_frequency)))
+		return false;
+
+	D3D12_QUERY_HEAP_DESC qh = {};
+	qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+	qh.Count = UploadSlotCount * ProfileMarksPerSlot;
+	if (FAILED(dev->CreateQueryHeap(&qh, __uuidof(ID3D12QueryHeap), decoder->timestamps.ppv())))
+		return false;
+
+	D3D12_HEAP_PROPERTIES heap = {};
+	heap.Type = D3D12_HEAP_TYPE_READBACK;
+	D3D12_RESOURCE_DESC desc = {};
+	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	desc.Width = qh.Count * sizeof(UINT64);
+	desc.Height = 1;
+	desc.DepthOrArraySize = 1;
+	desc.MipLevels = 1;
+	desc.SampleDesc.Count = 1;
+	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+	                                        __uuidof(ID3D12Resource), decoder->timestamp_readback.ppv())))
+	{
+		decoder->timestamps = nullptr;
+		return false;
+	}
+	return true;
+}
+
 bool create_wavelet_pyramid(pyrowave_d3d12_decoder decoder)
 {
 	auto *device = decoder->device;
@@ -228,6 +312,7 @@ bool ensure_slot_buffer(pyrowave_d3d12_decoder decoder, UploadSlot &slot, UINT64
 	}
 
 	slot.buffer->SetName(L"pyrowave decoder upload");
+
 	slot.capacity = allocate;
 	return true;
 }
@@ -411,6 +496,9 @@ void record_idwt(pyrowave_d3d12_decoder decoder, ID3D12GraphicsCommandList *cmd,
 				record_idwt_dispatch(decoder, cmd, push, decoder->pyramid_srv(c, input_level), output, final_chroma);
 			}
 		}
+
+		static const char *const names[] = { "idwt0", "idwt1", "idwt2", "idwt3", "idwt4" };
+		mark(decoder, cmd, slot_index, names[input_level]);
 	}
 
 	// Back to the resting state for the next frame's dequant.
@@ -469,6 +557,10 @@ pyrowave_d3d12_result pyrowave_d3d12_decoder_create(const pyrowave_d3d12_decoder
 
 	if (!create_wavelet_pyramid(created.get()))
 		return PYROWAVE_D3D12_ERROR_OUT_OF_DEVICE_MEMORY;
+
+	const char *profile_env = getenv("PYROWAVE_D3D12_PROFILE");
+	if (profile_env && profile_env[0] == '1' && !init_profiling(created.get()))
+		created->device->log("Decoder profiling unavailable.");
 
 	*decoder = created.release();
 	return PYROWAVE_D3D12_SUCCESS;
@@ -549,6 +641,7 @@ pyrowave_d3d12_result pyrowave_d3d12_decoder_decode_gpu_buffer(pyrowave_d3d12_de
 	auto &slot = decoder->slots[slot_index];
 	// Applies back pressure rather than growing the ring.
 	decoder->wait_slot(slot);
+	log_profile(decoder, slot_index);
 
 	const auto &offsets = decoder->parser.dequant_offsets();
 	const auto &payload = decoder->parser.payload();
@@ -578,7 +671,9 @@ pyrowave_d3d12_result pyrowave_d3d12_decoder_decode_gpu_buffer(pyrowave_d3d12_de
 	command_list->SetDescriptorHeaps(1, heaps);
 	command_list->SetComputeRootSignature(decoder->device->root_signature.get());
 
+	mark(decoder, command_list, slot_index, "start");
 	record_dequant(decoder, command_list, slot_index);
+	mark(decoder, command_list, slot_index, "dequant");
 	record_idwt(decoder, command_list, slot_index);
 
 	D3D12_RESOURCE_BARRIER uav_barriers[3] = {};
@@ -588,6 +683,14 @@ pyrowave_d3d12_result pyrowave_d3d12_decoder_decode_gpu_buffer(pyrowave_d3d12_de
 		uav_barriers[i].UAV.pResource = buffers->planes[i];
 	}
 	command_list->ResourceBarrier(3, uav_barriers);
+
+	if (decoder->timestamps && slot.num_marks)
+	{
+		mark(decoder, command_list, slot_index, "end");
+		command_list->ResolveQueryData(decoder->timestamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, slot_index * ProfileMarksPerSlot,
+		                               slot.num_marks, decoder->timestamp_readback.get(),
+		                               slot_index * ProfileMarksPerSlot * sizeof(UINT64));
+	}
 
 	// Held until this slot comes round again.
 	completion_fence->AddRef();

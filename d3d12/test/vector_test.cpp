@@ -421,8 +421,16 @@ double psnr(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b)
 	return mse == 0.0 ? 99.0 : 10.0 * log10(255.0 * 255.0 / mse);
 }
 
+// Keeps the decoder's latest per-stage profile line (PYROWAVE_D3D12_PROFILE=1).
+static void keep_profile(void *userdata, const char *msg)
+{
+	if (strstr(msg, "decode profile"))
+		*static_cast<std::string *>(userdata) = msg;
+}
+
 std::string run_suite(Context &ctx, const std::vector<TestVector> &vectors, int iterations, bool &pass)
 {
+	std::string last_profile;
 	std::string report;
 	pass = true;
 	appendf(report, "Adapter: %s\n", ctx.adapter_name.c_str());
@@ -432,6 +440,8 @@ std::string run_suite(Context &ctx, const std::vector<TestVector> &vectors, int 
 		pyrowave_d3d12_device_create_info info = {};
 		info.d3d12_device = ctx.device.get();
 		info.wavelet_precision = precision;
+		info.message_callback = keep_profile;
+		info.message_userdata = &last_profile;
 		pyrowave_d3d12_device device = nullptr;
 		pyrowave_d3d12_result res = pyrowave_d3d12_device_create(&info, &device);
 		if (res != PYROWAVE_D3D12_SUCCESS)
@@ -474,6 +484,11 @@ std::string run_suite(Context &ctx, const std::vector<TestVector> &vectors, int 
 			appendf(report, "[%s] %-16s decode %.3f ms (median %.3f)  max diff %d, %.3f%% px differ, PSNR vs ref %.1f dB\n",
 			        ok ? "PASS" : "FAIL", vec.name.c_str(), stats.best_ms, stats.median_ms, worst,
 			        100.0 * double(mismatches) / double(total ? total : 1), worst_psnr);
+			if (!last_profile.empty())
+			{
+				appendf(report, "    %s\n", last_profile.c_str());
+				last_profile.clear();
+			}
 		}
 		pyrowave_d3d12_device_destroy(device);
 	}
