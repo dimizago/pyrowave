@@ -68,7 +68,7 @@ bool create_root_signature(pyrowave_d3d12_device device)
 {
 	D3D12_DESCRIPTOR_RANGE ranges[4] = {};
 	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
-	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 1, 0, 0 };
+	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 1, 0, 0 };
 	ranges[2] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0 };
 	ranges[3] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0, 0 };
 
@@ -124,6 +124,47 @@ bool create_pipeline(pyrowave_d3d12_device device, const void *code, size_t size
                      ComPtr<ID3D12PipelineState> &pipeline)
 {
 	return create_compute_pipeline(device, device->root_signature.get(), code, size, name, pipeline);
+}
+
+// The Xbox decoder kernels (shaders/xbox) exist for one deployment: the
+// moonlight-xbox client decoding a PyroWave stream on Xbox Series. That client has to
+// declare the hevcPlayback capability to switch the TV to HDR10, which puts it in the
+// console's "4K media app" GPU partition whatever the Dev Home app type says. Measured
+// there (d3d12/test/tier_bench), the partition gets about 8% of the GPU's ALU
+// throughput, about 116 GB/s of memory bandwidth, LDS throughput cut about as hard as
+// ALU, and roughly 5x the latency, and the cost of a typed store depends mostly on how
+// compact each instruction's 64 texels are. The translated kernels took 4.5 ms for a
+// 4K 4:4:4 frame at streaming rates there; these take 1.8 ms (0.98 -> 0.46 ms with the
+// full Game-tier GPU).
+//
+// They are not a general improvement: on a desktop RDNA3 GPU they measured no faster
+// (slower at 1080p), and GPUs without 64-lane waves cannot run them. So they are the
+// default only where waves are always 64 lanes, which among D3D12 targets means the
+// Xbox. Returns which build to use: 64 (Shader Model 6.4, fixed 64-lane waves), 66
+// (Shader Model 6.6 with [WaveSize(64)], for testing on a PC GPU, only when
+// PYROWAVE_D3D12_XBOX_KERNELS=1), or 0 for the translated kernels
+// (PYROWAVE_D3D12_XBOX_KERNELS=0 forces that on Xbox too).
+int xbox_kernel_model(ID3D12Device *dev)
+{
+	const char *env = getenv("PYROWAVE_D3D12_XBOX_KERNELS");
+	const bool forced_on = env && env[0] == '1';
+	if (env && env[0] == '0')
+		return 0;
+
+	D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = {};
+	if (FAILED(dev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1))) ||
+	    !options1.WaveOps)
+		return 0;
+	if (options1.WaveLaneCountMin == 64 && options1.WaveLaneCountMax == 64)
+		return 64;
+
+	// A PC GPU: only on request, to test the Xbox kernels without a console.
+	D3D12_FEATURE_DATA_SHADER_MODEL sm = { D3D_SHADER_MODEL_6_6 };
+	if (forced_on && SUCCEEDED(dev->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))) &&
+	    sm.HighestShaderModel >= D3D_SHADER_MODEL_6_6 && options1.WaveLaneCountMin <= 64 &&
+	    options1.WaveLaneCountMax >= 64)
+		return 66;
+	return 0;
 }
 }
 
@@ -230,13 +271,30 @@ pyrowave_d3d12_result pyrowave_d3d12_device_create(const pyrowave_d3d12_device_c
 		return PYROWAVE_D3D12_ERROR_GENERIC;
 
 	const bool p2 = created->precision == 2;
-	if (!create_pipeline(created.get(), DXIL::wavelet_dequant, sizeof(DXIL::wavelet_dequant), "dequant",
-	                     created->dequant_pipeline) ||
-	    !create_pipeline(created.get(), p2 ? DXIL::idwt_p2 : DXIL::idwt_p1,
-	                     p2 ? sizeof(DXIL::idwt_p2) : sizeof(DXIL::idwt_p1), "idwt", created->idwt_pipeline[0]) ||
-	    !create_pipeline(created.get(), p2 ? DXIL::idwt_p2_dc : DXIL::idwt_p1_dc,
-	                     p2 ? sizeof(DXIL::idwt_p2_dc) : sizeof(DXIL::idwt_p1_dc), "idwt dc",
-	                     created->idwt_pipeline[1]))
+	// The Xbox iDWT reads the FP16 pyramid as raw bits, so the Xbox kernels are for
+	// precision 1, the one moonlight-xbox uses.
+	const int xbox_model = created->precision == 1 ? xbox_kernel_model(created->dev.get()) : 0;
+	if (xbox_model)
+	{
+#define PW_XBOX(name) (xbox_model == 64 ? DXIL::name##_sm64 : DXIL::name##_sm66), \
+		(xbox_model == 64 ? sizeof(DXIL::name##_sm64) : sizeof(DXIL::name##_sm66))
+		created->xbox_kernels =
+				create_pipeline(created.get(), PW_XBOX(wavelet_dequant_xbox), "dequant (Xbox)", created->dequant_pipeline) &&
+				create_pipeline(created.get(), PW_XBOX(idwt_xbox), "idwt (Xbox)", created->idwt_pipeline[0]) &&
+				create_pipeline(created.get(), PW_XBOX(idwt_xbox_dc), "idwt dc (Xbox)", created->idwt_pipeline[1]);
+#undef PW_XBOX
+	}
+	created->log("Decoder kernels: %s.",
+	             created->xbox_kernels ? (xbox_model == 64 ? "Xbox (SM 6.4)" : "Xbox, forced on a PC GPU (SM 6.6, WaveSize 64)")
+	                                   : "portable");
+	if (!created->xbox_kernels &&
+	    (!create_pipeline(created.get(), DXIL::wavelet_dequant, sizeof(DXIL::wavelet_dequant), "dequant",
+	                      created->dequant_pipeline) ||
+	     !create_pipeline(created.get(), p2 ? DXIL::idwt_p2 : DXIL::idwt_p1,
+	                      p2 ? sizeof(DXIL::idwt_p2) : sizeof(DXIL::idwt_p1), "idwt", created->idwt_pipeline[0]) ||
+	     !create_pipeline(created.get(), p2 ? DXIL::idwt_p2_dc : DXIL::idwt_p1_dc,
+	                      p2 ? sizeof(DXIL::idwt_p2_dc) : sizeof(DXIL::idwt_p1_dc), "idwt dc",
+	                      created->idwt_pipeline[1])))
 		return PYROWAVE_D3D12_ERROR_GENERIC;
 
 	*device = created.release();

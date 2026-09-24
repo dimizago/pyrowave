@@ -21,12 +21,15 @@ namespace D3D12
 // Threadgroup sizes are baked into the shaders as numthreads.
 constexpr uint32_t DequantThreadgroupSize = 128;
 constexpr uint32_t IdwtThreadgroupSize = 64;
+constexpr uint32_t XboxIdwtTileWidth = 64;
+constexpr uint32_t XboxIdwtTileHeight = 56;
 
 // One root signature serves every shader. SPIRV-Cross assigns registers from the
 // GLSL bindings, so the layout is:
 //   b0      root constants (the GLSL push constant block, "cbuffer Registers")
 //   t0      idwt: wavelet pyramid, sampled
 //   t1..t4  dequant: payload offsets (raw) and payload as R32/R16/R8 typed buffers
+//   t5      dequant (Xbox kernel): payload, raw
 //   u0      dequant: wavelet pyramid, written
 //   u1      idwt: LL band of the next level, or an output plane
 //   s0      mirror-repeat point sampler (static)
@@ -35,7 +38,7 @@ enum RootParameter : UINT
 {
 	RootConstants = 0,
 	RootTableT0 = 1,
-	RootTableT1ToT4 = 2,
+	RootTableT1ToT5 = 2,
 	RootTableU0 = 3,
 	RootTableU1 = 4,
 	RootParameterCount
@@ -76,6 +79,11 @@ struct pyrowave_d3d12_device_opaque
 	ComPtr<ID3D12Device> dev;
 	ComPtr<ID3D12RootSignature> root_signature;
 	ComPtr<ID3D12PipelineState> dequant_pipeline;
+	// The Xbox kernels (shaders/xbox, tuned for moonlight-xbox in the console's
+	// hevcPlayback GPU partition; see xbox_kernel_model) are in dequant_pipeline and
+	// idwt_pipeline: dequant runs one 64-thread group per 32x32 block instead of 128
+	// threads, and the iDWT makes 64x56 tiles with 128 threads (see XboxIdwtTile*).
+	bool xbox_kernels = false;
 	// Indexed by the DCShift constant.
 	ComPtr<ID3D12PipelineState> idwt_pipeline[2];
 

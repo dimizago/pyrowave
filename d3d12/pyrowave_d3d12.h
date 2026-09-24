@@ -101,6 +101,14 @@ pyrowave_d3d12_device_supports_encoder(struct ID3D12Device *d3d12_device);
 // Unless wavelet_precision is set, the PYROWAVE_PRECISION environment variable selects
 // the precision as on the Vulkan side, except that 0 (FP16 math) is treated as 1, since
 // native 16-bit arithmetic is not available on every target.
+//
+// On Xbox Series at precision 1, the decoder uses kernels written for the
+// moonlight-xbox client (shaders/xbox): that client needs the hevcPlayback capability
+// for HDR10 output, which confines it to the console's reduced "4K media app" GPU
+// partition, and there they decode a 4K 4:4:4 frame at streaming rates in 1.8 ms
+// instead of 4.5 ms, and more accurately. Other devices use the translated kernels.
+// PYROWAVE_D3D12_XBOX_KERNELS=0 disables them; =1 runs them on a PC GPU with 64-lane
+// wave support, for testing.
 PYROWAVE_D3D12_PUBLIC_API pyrowave_d3d12_result
 pyrowave_d3d12_device_create(const pyrowave_d3d12_device_create_info *info, pyrowave_d3d12_device *device);
 
