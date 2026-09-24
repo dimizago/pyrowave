@@ -5,12 +5,11 @@
 // pyrowave_decoder.cpp by way of the Metal port (metal/pyrowave_decoder.mm), whose
 // bitstream layer is shared verbatim.
 //
-// Resource state model: every subresource of the wavelet pyramid rests in
-// UNORDERED_ACCESS between decodes. Dequant writes it as UAV; the iDWT then walks
+// Resource state model: the wavelet pyramid is a simultaneous-access (uncompressed)
+// texture resting in COMMON between decodes. Dequant writes it as UAV; the iDWT then walks
 // the levels from coarsest to finest, transitioning one mip at a time to
 // NON_PIXEL_SHADER_RESOURCE right before it is sampled (which also makes the LL band
-// the previous level wrote visible), and everything is returned to UNORDERED_ACCESS
-// at the end.
+// the previous level wrote visible), and everything is returned to COMMON at the end.
 
 #include "pyrowave_d3d12_internal.hpp"
 
@@ -230,10 +229,13 @@ bool create_wavelet_pyramid(pyrowave_d3d12_decoder decoder)
 	desc.Format = decoder->wavelet_format;
 	desc.SampleDesc.Count = 1;
 	desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-	desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+	desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
+	             // No compression: otherwise every UAV <-> SRV transition of the iDWT
+	             // decompresses the level (AMD: iDWT 203 -> 100 us at 4K 4:4:4).
+	             D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 
 	if (FAILED(device->dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-	                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+	                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
 	                                                __uuidof(ID3D12Resource), decoder->wavelet.ppv())))
 	{
 		device->log("Failed to allocate the wavelet pyramid.");
@@ -403,6 +405,15 @@ void record_dequant(pyrowave_d3d12_decoder decoder, ID3D12GraphicsCommandList *c
 {
 	auto &layout = decoder->layout;
 
+	// Resting state is COMMON (simultaneous-access resources decay to it anyway).
+	D3D12_RESOURCE_BARRIER to_uav = {};
+	to_uav.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	to_uav.Transition.pResource = decoder->wavelet.get();
+	to_uav.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	to_uav.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+	to_uav.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	cmd->ResourceBarrier(1, &to_uav);
+
 	cmd->SetPipelineState(decoder->device->dequant_pipeline.get());
 	cmd->SetComputeRootDescriptorTable(RootTableT1ToT4, decoder->gpu(decoder->slot_base(slot_index)));
 
@@ -501,10 +512,10 @@ void record_idwt(pyrowave_d3d12_decoder decoder, ID3D12GraphicsCommandList *cmd,
 		mark(decoder, cmd, slot_index, names[input_level]);
 	}
 
-	// Back to the resting state for the next frame's dequant.
+	// Back to the resting state.
 	for (int level = 0; level < DecompositionLevels; level++)
 		transition_level(decoder, cmd, level, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-		                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		                 D3D12_RESOURCE_STATE_COMMON);
 }
 }
 
