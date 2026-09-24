@@ -9,6 +9,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 namespace PyroWaveTest
@@ -241,8 +242,15 @@ void Context::wait(UINT64 value)
 	}
 }
 
+int g_decode_pace_ms = 0;
+DXGI_FORMAT g_output_format = DXGI_FORMAT_R8_UNORM;
+std::vector<int> g_precisions = { 2, 1 };
+std::wstring g_baseline_dir;
+bool g_baseline_save = false;
+bool g_baseline_quality = false;
+
 bool decode(Context &ctx, pyrowave_d3d12_device device, const TestVector &vec, int iterations, Planes &out,
-            DecodeStats &stats, std::string &error)
+            DecodeStats &stats, std::string &error, const TestVector *previous)
 {
 	pyrowave_d3d12_decoder_create_info info = {};
 	info.device = device;
@@ -269,7 +277,7 @@ bool decode(Context &ctx, pyrowave_d3d12_device device, const TestVector &vec, i
 		desc.Height = UINT(out.height[i]);
 		desc.DepthOrArraySize = 1;
 		desc.MipLevels = 1;
-		desc.Format = DXGI_FORMAT_R8_UNORM;
+		desc.Format = g_output_format;
 		desc.SampleDesc.Count = 1;
 		desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 		planes[i] = create_resource(ctx.device.get(), D3D12_HEAP_TYPE_DEFAULT, desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -297,13 +305,15 @@ bool decode(Context &ctx, pyrowave_d3d12_device device, const TestVector &vec, i
 	ctx.queue->GetTimestampFrequency(&ts_freq);
 
 	std::vector<double> times;
-	for (int iter = 0; iter < iterations; iter++)
+	for (int iter = previous ? -1 : 0; iter < iterations; iter++)
 	{
+		// Iteration -1 decodes `previous`.
+		const TestVector &frame = iter < 0 ? *previous : vec;
 		// Re-push every iteration: a decode marks the frame consumed.
 		pyrowave_d3d12_decoder_clear(decoder);
-		for (auto &p : vec.packets)
+		for (auto &p : frame.packets)
 		{
-			res = pyrowave_d3d12_decoder_push_packet(decoder, vec.bitstream.data() + p.offset, p.size);
+			res = pyrowave_d3d12_decoder_push_packet(decoder, frame.bitstream.data() + p.offset, p.size);
 			if (res != PYROWAVE_D3D12_SUCCESS)
 			{
 				error = std::string("pyrowave_d3d12_decoder_push_packet: ") + pyrowave_d3d12_result_to_string(res);
@@ -357,6 +367,8 @@ bool decode(Context &ctx, pyrowave_d3d12_device device, const TestVector &vec, i
 		}
 
 		ctx.wait(ctx.submit());
+		if (g_decode_pace_ms > 0)
+			Sleep(DWORD(g_decode_pace_ms));
 		HRESULT removed = ctx.device->GetDeviceRemovedReason();
 		if (FAILED(removed))
 		{
@@ -369,7 +381,7 @@ bool decode(Context &ctx, pyrowave_d3d12_device device, const TestVector &vec, i
 
 		UINT64 *ts = nullptr;
 		D3D12_RANGE range = { 0, 16 };
-		if (SUCCEEDED(ts_readback->Map(0, &range, reinterpret_cast<void **>(&ts))))
+		if (iter >= 0 && SUCCEEDED(ts_readback->Map(0, &range, reinterpret_cast<void **>(&ts))))
 		{
 			times.push_back(double(ts[1] - ts[0]) * 1000.0 / double(ts_freq));
 			ts_readback->Unmap(0, nullptr);
@@ -380,13 +392,27 @@ bool decode(Context &ctx, pyrowave_d3d12_device device, const TestVector &vec, i
 	stats.best_ms = times.empty() ? 0.0 : times.front();
 	stats.median_ms = times.empty() ? 0.0 : times[times.size() / 2];
 
+	const bool wide = g_output_format == DXGI_FORMAT_R16_UNORM;
 	for (int i = 0; i < 3; i++)
 	{
 		uint8_t *mapped = nullptr;
 		readback[i]->Map(0, nullptr, reinterpret_cast<void **>(&mapped));
+		if (wide)
+			out.data16[i].resize(out.data[i].size());
 		for (int y = 0; y < out.height[i]; y++)
-			memcpy(out.data[i].data() + size_t(y) * out.width[i],
-			       mapped + footprints[i].Offset + size_t(y) * footprints[i].Footprint.RowPitch, size_t(out.width[i]));
+		{
+			const uint8_t *row = mapped + footprints[i].Offset + size_t(y) * footprints[i].Footprint.RowPitch;
+			const size_t base = size_t(y) * out.width[i];
+			if (!wide)
+			{
+				memcpy(out.data[i].data() + base, row, size_t(out.width[i]));
+				continue;
+			}
+			memcpy(out.data16[i].data() + base, row, size_t(out.width[i]) * 2);
+			// UNORM16 -> UNORM8 with rounding, as a shader writing R8 would.
+			for (int x = 0; x < out.width[i]; x++)
+				out.data[i][base + x] = uint8_t((uint32_t(out.data16[i][base + x]) * 255u + 32767u) / 65535u);
+		}
 		readback[i]->Unmap(0, nullptr);
 	}
 
@@ -421,27 +447,227 @@ double psnr(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b)
 	return mse == 0.0 ? 99.0 : 10.0 * log10(255.0 * 255.0 / mse);
 }
 
-// Keeps the decoder's latest per-stage profile line (PYROWAVE_D3D12_PROFILE=1).
+double ssim(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b, int width, int height)
+{
+	constexpr int R = 5;
+	float w[2 * R + 1];
+	float sum = 0.0f;
+	for (int i = -R; i <= R; i++)
+		sum += (w[i + R] = expf(-float(i * i) / (2.0f * 1.5f * 1.5f)));
+	for (auto &v : w)
+		v /= sum;
+	if (width <= 2 * R || height <= 2 * R)
+		return 1.0;
+
+	// Separable filtering of x, y, x^2, y^2 and xy; the horizontal pass keeps only the
+	// columns the window fits around.
+	const int ow = width - 2 * R;
+	std::vector<float> h[5];
+	for (auto &plane : h)
+		plane.resize(size_t(ow) * height);
+	for (int y = 0; y < height; y++)
+	{
+		const uint8_t *ra = a.data() + size_t(y) * width;
+		const uint8_t *rb = b.data() + size_t(y) * width;
+		for (int x = 0; x < ow; x++)
+		{
+			float s[5] = {};
+			for (int k = 0; k <= 2 * R; k++)
+			{
+				const float fa = ra[x + k], fb = rb[x + k];
+				s[0] += w[k] * fa;
+				s[1] += w[k] * fb;
+				s[2] += w[k] * fa * fa;
+				s[3] += w[k] * fb * fb;
+				s[4] += w[k] * fa * fb;
+			}
+			for (int i = 0; i < 5; i++)
+				h[i][size_t(y) * ow + x] = s[i];
+		}
+	}
+
+	const double c1 = (0.01 * 255.0) * (0.01 * 255.0), c2 = (0.03 * 255.0) * (0.03 * 255.0);
+	double total = 0.0;
+	for (int y = 0; y < height - 2 * R; y++)
+	{
+		for (int x = 0; x < ow; x++)
+		{
+			double s[5] = {};
+			for (int k = 0; k <= 2 * R; k++)
+				for (int i = 0; i < 5; i++)
+					s[i] += w[k] * h[i][size_t(y + k) * ow + x];
+			const double va = s[2] - s[0] * s[0], vb = s[3] - s[1] * s[1], cov = s[4] - s[0] * s[1];
+			total += ((2.0 * s[0] * s[1] + c1) * (2.0 * cov + c2)) /
+			         ((s[0] * s[0] + s[1] * s[1] + c1) * (va + vb + c2));
+		}
+	}
+	return total / (double(ow) * double(height - 2 * R));
+}
+
+bool read_raw_planes(const char *path, Planes &p)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return false;
+	bool ok = true;
+	for (auto &plane : p.data)
+		ok = ok && fread(plane.data(), 1, plane.size(), f) == plane.size();
+	fclose(f);
+	return ok;
+}
+
+// Collects the decoder's per-stage profile lines (PYROWAVE_D3D12_PROFILE=1) and which
+// kernels the device picked.
+struct DecoderLog
+{
+	std::vector<std::string> profile_lines;
+	std::string kernels;
+};
+
 static void keep_profile(void *userdata, const char *msg)
 {
+	auto *log = static_cast<DecoderLog *>(userdata);
 	if (strstr(msg, "decode profile"))
-		*static_cast<std::string *>(userdata) = msg;
+		log->profile_lines.push_back(msg);
+	else if (strstr(msg, "Decoder kernels"))
+		log->kernels = msg;
+
+}
+
+// "decode profile total T us: a 1.0 b 2.0 ..." lines -> one line of per-stage medians.
+static std::string median_profile(const std::vector<std::string> &lines)
+{
+	std::vector<std::string> names;
+	std::vector<std::vector<double>> values;
+	for (auto &line : lines)
+	{
+		size_t colon = line.find("us:");
+		if (colon == std::string::npos)
+			continue;
+		std::vector<std::string> tokens;
+		size_t pos = colon + 3;
+		while (pos < line.size())
+		{
+			while (pos < line.size() && line[pos] == ' ')
+				pos++;
+			size_t end = line.find(' ', pos);
+			if (end == std::string::npos)
+				end = line.size();
+			if (end > pos)
+				tokens.push_back(line.substr(pos, end - pos));
+			pos = end;
+		}
+		std::vector<std::string> line_names;
+		std::vector<double> line_values;
+		line_names.push_back("total");
+		line_values.push_back(atof(line.c_str() + line.find("total") + 5));
+		for (size_t i = 0; i + 1 < tokens.size(); i += 2)
+		{
+			line_names.push_back(tokens[i]);
+			line_values.push_back(atof(tokens[i + 1].c_str()));
+		}
+		if (names.empty())
+		{
+			names = line_names;
+			values.resize(names.size());
+		}
+		if (line_names != names)
+			continue;
+		for (size_t i = 0; i < names.size(); i++)
+			values[i].push_back(line_values[i]);
+	}
+	if (names.empty())
+		return {};
+	std::string out;
+	appendf(out, "stage medians (us, %zu frames):", values[0].size());
+	for (size_t i = 0; i < names.size(); i++)
+	{
+		std::sort(values[i].begin(), values[i].end());
+		appendf(out, " %s %.1f", names[i].c_str(), values[i][values[i].size() / 2]);
+	}
+	return out;
+}
+
+// Saves or compares the raw output planes against g_baseline_dir.
+static std::string check_baseline(const TestVector &vec, int precision, const Planes &out)
+{
+	const bool wide = !out.data16[0].empty();
+	std::wstring path = g_baseline_dir + L"\\";
+	for (char c : vec.name)
+		path += wchar_t(c);
+	path += L"_p" + std::to_wstring(g_baseline_quality ? 2 : precision) + (wide ? L"_16" : L"_8") + L".raw";
+
+	std::vector<uint8_t> bytes;
+	for (int i = 0; i < 3; i++)
+	{
+		const uint8_t *p = wide ? reinterpret_cast<const uint8_t *>(out.data16[i].data()) : out.data[i].data();
+		bytes.insert(bytes.end(), p, p + out.data[i].size() * (wide ? 2 : 1));
+	}
+
+	if (g_baseline_save)
+	{
+		FILE *f = _wfopen(path.c_str(), L"wb");
+		bool ok = f && fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+		if (f)
+			fclose(f);
+		return ok ? "baseline saved" : "baseline SAVE FAILED";
+	}
+
+	std::vector<uint8_t> ref(bytes.size());
+	FILE *f = _wfopen(path.c_str(), L"rb");
+	if (!f)
+		return "baseline MISSING";
+	bool ok = fread(ref.data(), 1, ref.size(), f) == ref.size();
+	fclose(f);
+	if (!ok)
+		return "baseline MISSING (short file)";
+
+	size_t differ = 0;
+	int max_diff = 0;
+	double sum_sq = 0.0;
+	const size_t elem = wide ? 2 : 1;
+	for (size_t i = 0; i < bytes.size(); i += elem)
+	{
+		int a = wide ? int(bytes[i] | (bytes[i + 1] << 8)) : int(bytes[i]);
+		int b = wide ? int(ref[i] | (ref[i + 1] << 8)) : int(ref[i]);
+		if (a != b)
+		{
+			differ++;
+			max_diff = abs(a - b) > max_diff ? abs(a - b) : max_diff;
+			sum_sq += double(a - b) * double(a - b);
+		}
+	}
+	std::string r;
+	if (g_baseline_quality)
+	{
+		const double peak = wide ? 65535.0 : 255.0;
+		const double mse = sum_sq / double(bytes.size() / elem);
+		appendf(r, "vs FP32 decode (quality): max diff %d, rms %.2f, PSNR %.2f dB (%s units)", max_diff, sqrt(mse),
+		        mse > 0.0 ? 10.0 * log10(peak * peak / mse) : 99.0, wide ? "16-bit" : "8-bit");
+		return r;
+	}
+	if (differ == 0)
+		r = "baseline IDENTICAL";
+	else
+		appendf(r, "baseline DIFFERS: %zu of %zu values, max diff %d", differ, bytes.size() / elem, max_diff);
+	return r;
 }
 
 std::string run_suite(Context &ctx, const std::vector<TestVector> &vectors, int iterations, bool &pass)
 {
-	std::string last_profile;
+	DecoderLog log;
 	std::string report;
 	pass = true;
-	appendf(report, "Adapter: %s\n", ctx.adapter_name.c_str());
+	appendf(report, "Adapter: %s, output %s\n", ctx.adapter_name.c_str(),
+	        g_output_format == DXGI_FORMAT_R16_UNORM ? "R16_UNORM" : "R8_UNORM");
 
-	for (int precision : { 2, 1 })
+	for (int precision : g_precisions)
 	{
 		pyrowave_d3d12_device_create_info info = {};
 		info.d3d12_device = ctx.device.get();
 		info.wavelet_precision = precision;
 		info.message_callback = keep_profile;
-		info.message_userdata = &last_profile;
+		info.message_userdata = &log;
 		pyrowave_d3d12_device device = nullptr;
 		pyrowave_d3d12_result res = pyrowave_d3d12_device_create(&info, &device);
 		if (res != PYROWAVE_D3D12_SUCCESS)
@@ -453,14 +679,23 @@ std::string run_suite(Context &ctx, const std::vector<TestVector> &vectors, int 
 		}
 
 		const int tolerance = precision == 2 ? 1 : 2;
-		appendf(report, "\n--- precision %d (%s), tolerance %d ---\n", precision,
-		        precision == 2 ? "FP32" : "FP16 storage", tolerance);
+		appendf(report, "\n--- precision %d (%s), tolerance %d ---\n%s\n", precision,
+		        precision == 2 ? "FP32" : "FP16 storage", tolerance, log.kernels.c_str());
 		for (auto &vec : vectors)
 		{
 			Planes out;
 			DecodeStats stats;
 			std::string error;
-			if (!decode(ctx, device, vec, iterations, out, stats, error))
+			// Decode another frame of the same format first, the densest one, so stale
+			// pyramid contents are another frame's.
+			const TestVector *previous = nullptr;
+			for (auto &other : vectors)
+				if (&other != &vec && other.width == vec.width && other.height == vec.height &&
+				    other.chroma_444 == vec.chroma_444 &&
+				    (!previous || other.bitstream.size() > previous->bitstream.size()))
+					previous = &other;
+			log.profile_lines.clear();
+			if (!decode(ctx, device, vec, iterations, out, stats, error, previous))
 			{
 				appendf(report, "[FAIL] %s: %s\n", vec.name.c_str(), error.c_str());
 				pass = false;
@@ -479,16 +714,26 @@ std::string run_suite(Context &ctx, const std::vector<TestVector> &vectors, int 
 				double p = psnr(vec.reference.data[i], out.data[i]);
 				worst_psnr = p < worst_psnr ? p : worst_psnr;
 			}
-			const bool ok = worst <= tolerance;
+			bool ok = worst <= tolerance;
+			std::string baseline;
+			if (!g_baseline_dir.empty())
+			{
+				baseline = check_baseline(vec, precision, out);
+				if (!g_baseline_quality && baseline.find("IDENTICAL") == std::string::npos &&
+				    baseline.find("saved") == std::string::npos)
+					ok = false;
+			}
 			pass = pass && ok;
 			appendf(report, "[%s] %-16s decode %.3f ms (median %.3f)  max diff %d, %.3f%% px differ, PSNR vs ref %.1f dB\n",
 			        ok ? "PASS" : "FAIL", vec.name.c_str(), stats.best_ms, stats.median_ms, worst,
 			        100.0 * double(mismatches) / double(total ? total : 1), worst_psnr);
-			if (!last_profile.empty())
-			{
-				appendf(report, "    %s\n", last_profile.c_str());
-				last_profile.clear();
-			}
+			if (previous)
+				appendf(report, "    (decoded after %s)\n", previous->name.c_str());
+			if (!baseline.empty())
+				appendf(report, "    %s\n", baseline.c_str());
+			std::string profile = median_profile(log.profile_lines);
+			if (!profile.empty())
+				appendf(report, "    %s\n", profile.c_str());
 		}
 		pyrowave_d3d12_device_destroy(device);
 	}

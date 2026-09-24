@@ -23,7 +23,8 @@ target_compile_definitions(pyrowave-d3d12 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(pyrowave-d3d12 PUBLIC d3d12)
 
 # Test harness shared by the tools below and the Xbox test app (test/uwp).
-add_library(pyrowave-d3d12-test-harness STATIC test/vector_test.cpp test/vector_test.hpp)
+add_library(pyrowave-d3d12-test-harness STATIC test/vector_test.cpp test/vector_test.hpp
+        test/tier_bench.cpp test/tier_bench.hpp test/tier_bench_dxil.h)
 target_link_libraries(pyrowave-d3d12-test-harness PUBLIC pyrowave-d3d12 dxgi)
 target_compile_definitions(pyrowave-d3d12-test-harness PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 

@@ -18,7 +18,11 @@
 // .y4m files that pyrowave-bench can read, for an apples-to-apples timing comparison.
 //
 // Usage: pyrowave-d3d12-encode-compare [--precision N] [--debug | --gbv] [--iterations N]
-//                                      [--bytes N] [--y4m DIR]
+//                                      [--bytes N] [--y4m DIR] [--only WxH_444|WxH_420] [--source FILE]
+//
+// --source FILE encodes a raw 8-bit planar frame (yuv444p or yuv420p matching --only,
+// e.g. a game screenshot converted with ffmpeg) instead of the synthetic image. PSNR and
+// SSIM are reported against the source, luma-weighted (6Y + Cb + Cr) / 8.
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -233,6 +237,14 @@ double avg_psnr(const Planes &a, const Planes &b)
 	return (6.0 * psnr(a.data[0], b.data[0]) + psnr(a.data[1], b.data[1]) + psnr(a.data[2], b.data[2])) / 8.0;
 }
 
+double avg_ssim(const Planes &a, const Planes &b)
+{
+	double s[3];
+	for (int i = 0; i < 3; i++)
+		s[i] = ssim(a.data[i], b.data[i], a.width[i], a.height[i]);
+	return (6.0 * s[0] + s[1] + s[2]) / 8.0;
+}
+
 int max_diff(const Planes &a, const Planes &b)
 {
 	int worst = 0;
@@ -292,6 +304,8 @@ int main(int argc, char **argv)
 	bool debug = false, gpu_validation = false;
 	size_t fixed_bytes = 0;
 	std::string y4m_dir;
+	const char *only = nullptr;
+	const char *source_path = nullptr;
 	for (int i = 1; i < argc; i++)
 	{
 		if (!strcmp(argv[i], "--precision") && i + 1 < argc)
@@ -306,6 +320,10 @@ int main(int argc, char **argv)
 			fixed_bytes = size_t(atoll(argv[++i]));
 		else if (!strcmp(argv[i], "--y4m") && i + 1 < argc)
 			y4m_dir = argv[++i];
+		else if (!strcmp(argv[i], "--only") && i + 1 < argc)
+			only = argv[++i];
+		else if (!strcmp(argv[i], "--source") && i + 1 < argc)
+			source_path = argv[++i];
 	}
 
 	char env[32];
@@ -338,13 +356,22 @@ int main(int argc, char **argv)
 
 	printf("D3D12 adapter: %s, PYROWAVE_PRECISION=%d%s\n\n", ctx.adapter_name.c_str(), precision,
 	       gpu_validation ? ", debug layer + GPU-based validation on" : (debug ? ", debug layer on" : ""));
-	printf("%-14s %4s  %9s %9s %9s  %7s %7s %6s  %4s %4s %4s  %8s\n", "case", "bpp", "target", "vk bytes", "d12 bytes",
-	       "vk dB", "d12 dB", "delta", "C", "D", "E", "enc ms");
+	printf("%-14s %4s  %9s %9s %9s  %7s %7s %6s  %7s %7s  %4s %4s %4s  %8s\n", "case", "bpp", "target", "vk bytes",
+	       "d12 bytes", "vk dB", "d12 dB", "delta", "vk SSIM", "d12SSIM", "C", "D", "E", "enc ms");
 
 	bool ok = true;
 	for (auto &tc : test_cases)
 	{
+		char tc_name[64];
+		snprintf(tc_name, sizeof(tc_name), "%dx%d_%s", tc.width, tc.height, tc.chroma_444 ? "444" : "420");
+		if (only && strcmp(only, tc_name) != 0)
+			continue;
 		Planes source = make_test_image(tc.width, tc.height, tc.chroma_444);
+		if (source_path && !read_raw_planes(source_path, source))
+		{
+			fprintf(stderr, "Failed to read %s as a %s frame.\n", source_path, tc_name);
+			return 1;
+		}
 		if (!y4m_dir.empty())
 		{
 			char path[512];
@@ -479,9 +506,9 @@ int main(int argc, char **argv)
 
 			char e_str[8];
 			snprintf(e_str, sizeof(e_str), "%d", e_diff);
-			printf("%-14s %4.1f  %9zu %9zu %9zu  %7.2f %7.2f %+6.2f  %4d %4d %4s  %8.3f  %s\n", name, bpp, target, a.bytes,
-			       b.bytes, psnr_a, psnr_b, delta, c_diff, d_diff, e_diff < 0 ? "-" : e_str, best_ms,
-			       row_ok ? "PASS" : "FAIL");
+			printf("%-14s %4.1f  %9zu %9zu %9zu  %7.2f %7.2f %+6.2f  %7.4f %7.4f  %4d %4d %4s  %8.3f  %s\n", name, bpp,
+			       target, a.bytes, b.bytes, psnr_a, psnr_b, delta, avg_ssim(source, dec_a), avg_ssim(source, dec_b),
+			       c_diff, d_diff, e_diff < 0 ? "-" : e_str, best_ms, row_ok ? "PASS" : "FAIL");
 		}
 		pyrowave_d3d12_encoder_destroy(encoder);
 	}

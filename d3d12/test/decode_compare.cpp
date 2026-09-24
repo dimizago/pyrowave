@@ -14,7 +14,11 @@
 // Xbox test app, or pyrowave-d3d12-vector-test, can replay without Vulkan.
 //
 // Usage: pyrowave-d3d12-decode-compare [--precision N] [--debug | --gbv] [--iterations N] [--dump DIR]
-//                                      [--bytes N] [--only WxH_444|WxH_420]
+//                                      [--bytes N] [--only WxH_444|WxH_420] [--source FILE] [--name NAME]
+//
+// --source FILE encodes a raw 8-bit planar frame (yuv444p or yuv420p, matching --only,
+// e.g. a game screenshot converted with ffmpeg) instead of the synthetic image, and
+// --name NAME names the dumped vector.
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -67,6 +71,9 @@ pyrowave_cpu_buffer as_cpu_buffer(Planes &p, bool chroma_444)
 
 // --bytes N: fixed bitstream budget instead of ~3 bits per luma pixel.
 static size_t g_bytes = 0;
+static const char *g_source = nullptr;
+static const char *g_name = nullptr;
+
 
 #define VK_CHECKED(x) do { pyrowave_result r_ = (x); if (r_ != PYROWAVE_SUCCESS) { \
 	fprintf(stderr, "%s failed: %d\n", #x, int(r_)); return false; } } while (0)
@@ -75,6 +82,12 @@ static size_t g_bytes = 0;
 bool make_vector(pyrowave_device vk, const TestCase &tc, TestVector &vec, Planes &source)
 {
 	source = make_test_image(tc.width, tc.height, tc.chroma_444);
+	if (g_source && !read_raw_planes(g_source, source))
+	{
+		fprintf(stderr, "Failed to read %s as a %dx%d %s frame.\n", g_source, tc.width, tc.height,
+		        tc.chroma_444 ? "yuv444p" : "yuv420p");
+		return false;
+	}
 	const pyrowave_chroma_subsampling chroma =
 			tc.chroma_444 ? PYROWAVE_CHROMA_SUBSAMPLING_444 : PYROWAVE_CHROMA_SUBSAMPLING_420;
 
@@ -83,7 +96,7 @@ bool make_vector(pyrowave_device vk, const TestCase &tc, TestVector &vec, Planes
 	vec.chroma_444 = tc.chroma_444;
 	char name[64];
 	snprintf(name, sizeof(name), "%dx%d_%s", tc.width, tc.height, tc.chroma_444 ? "444" : "420");
-	vec.name = name;
+	vec.name = g_name ? g_name : name;
 
 	// Roughly 3 bits per luma pixel.
 	pyrowave_encoder_create_info enc_info = {};
@@ -178,6 +191,10 @@ int main(int argc, char **argv)
 			g_bytes = size_t(atoll(argv[++i]));
 		else if (!strcmp(argv[i], "--only") && i + 1 < argc)
 			only = argv[++i];
+		else if (!strcmp(argv[i], "--source") && i + 1 < argc)
+			g_source = argv[++i];
+		else if (!strcmp(argv[i], "--name") && i + 1 < argc)
+			g_name = argv[++i];
 		else if (!strcmp(argv[i], "--debug"))
 			debug = true;
 		else if (!strcmp(argv[i], "--gbv"))
@@ -257,9 +274,13 @@ int main(int argc, char **argv)
 		{
 			PlaneDiff d = compare(vec.reference.data[i], decoded.data[i]);
 			worst = d.max_diff > worst ? d.max_diff : worst;
-			printf("    %s  vs Vulkan: max diff %3d, %8zu px differ (%6.3f%%) | PSNR vs source: Vulkan %.2f dB, D3D12 %.2f dB\n",
+			printf("    %s  vs Vulkan: max diff %3d, %8zu px differ (%6.3f%%) | vs source: Vulkan %.2f dB SSIM %.4f, "
+			       "D3D12 %.2f dB SSIM %.4f\n",
 			       names[i], d.max_diff, d.mismatches, 100.0 * double(d.mismatches) / double(d.total),
-			       psnr(source.data[i], vec.reference.data[i]), psnr(source.data[i], decoded.data[i]));
+			       psnr(source.data[i], vec.reference.data[i]),
+			       ssim(source.data[i], vec.reference.data[i], source.width[i], source.height[i]),
+			       psnr(source.data[i], decoded.data[i]),
+			       ssim(source.data[i], decoded.data[i], source.width[i], source.height[i]));
 		}
 
 		if (!dump_dir.empty())

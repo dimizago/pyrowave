@@ -23,6 +23,9 @@ namespace PyroWaveTest
 struct Planes
 {
 	std::vector<uint8_t> data[3];
+	// The raw decoder output when the planes are 16-bit (g_output_format R16_UNORM);
+	// data[] then holds it rounded to 8 bits for comparison with the reference.
+	std::vector<uint16_t> data16[3];
 	int width[3] = {};
 	int height[3] = {};
 
@@ -80,8 +83,10 @@ struct DecodeStats
 };
 
 // Decodes the frame `iterations` times into R8 planes and reads the last one back.
+// `previous`, if set, is decoded first with the same decoder, so any state a frame
+// leaves behind (the wavelet pyramid) holds another frame's data, as in a stream.
 bool decode(Context &ctx, pyrowave_d3d12_device device, const TestVector &vec, int iterations, Planes &out,
-            DecodeStats &stats, std::string &error);
+            DecodeStats &stats, std::string &error, const TestVector *previous = nullptr);
 
 struct PlaneDiff
 {
@@ -92,6 +97,13 @@ struct PlaneDiff
 
 PlaneDiff compare(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b);
 double psnr(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b);
+
+// Mean SSIM (Wang et al. 2004: 11x11 Gaussian window, sigma 1.5, K1 0.01, K2 0.03,
+// over the pixels the window fits around) of two 8-bit planes.
+double ssim(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b, int width, int height);
+
+// Reads a raw 8-bit planar frame (yuv444p or yuv420p, as allocated in p).
+bool read_raw_planes(const char *path, Planes &p);
 
 // Deterministic synthetic frame: gradients, sinusoids of several frequencies, hard
 // edges, fine lines and a little noise -- something for every wavelet band.
@@ -104,4 +116,24 @@ void appendf(std::string &out, const char *fmt, ...);
 // against the reference (expected to be a Vulkan PYROWAVE_PRECISION=2 decode) and
 // reports GPU decode times. Tolerance is 1 LSB at precision 2 and 2 at precision 1.
 std::string run_suite(Context &ctx, const std::vector<TestVector> &vectors, int iterations, bool &pass);
+
+// Milliseconds to sleep between decode iterations (0 = back to back), to mimic a
+// stream's one-frame-per-refresh submission pattern.
+extern int g_decode_pace_ms;
+
+// Output plane format: DXGI_FORMAT_R8_UNORM (default) or DXGI_FORMAT_R16_UNORM, the
+// format the Moonlight client decodes into.
+extern DXGI_FORMAT g_output_format;
+
+// Wavelet precisions run_suite covers, in order (default 2 then 1).
+extern std::vector<int> g_precisions;
+
+// Bit-exact regression against an earlier build of the decoder: when set, run_suite
+// saves (g_baseline_save) or compares the raw output planes of every vector and
+// precision as <dir>\<name>_p<precision>.raw.
+extern std::wstring g_baseline_dir;
+extern bool g_baseline_save;
+// Instead of requiring bit-exactness, measure each 16-bit output against the stored
+// precision 2 (FP32) output of the same vector and report the error (g_baseline_dir).
+extern bool g_baseline_quality;
 }
