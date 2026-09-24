@@ -214,6 +214,15 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 
 		size_t packet_size = header->payload_words * sizeof(uint32_t);
 
+		// A packet cannot be shorter than its own header. payload_words == 0 would not
+		// advance the loop below, and a repeated block index returns success without
+		// consuming anything, so it would spin forever.
+		if (packet_size < sizeof(*header))
+		{
+			LOGE("payload_words is not large enough.\n");
+			return false;
+		}
+
 		if (packet_size > size)
 		{
 			LOGE("Packet header states %zu bytes, but only %zu bytes left to parse.\n", packet_size, size);
