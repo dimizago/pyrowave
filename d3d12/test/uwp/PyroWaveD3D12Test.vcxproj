@@ -69,10 +69,13 @@
   <ItemGroup>
     <ClCompile Include="App.cpp" />
     <ClCompile Include="..\vector_test.cpp" />
+    <ClCompile Include="..\tier_bench.cpp" />
     <ClCompile Include="..\..\pyrowave_d3d12_device.cpp" />
     <ClCompile Include="..\..\pyrowave_d3d12_decoder.cpp" />
     <ClCompile Include="..\..\..\metal\pyrowave_bitstream.cpp" />
     <ClInclude Include="..\vector_test.hpp" />
+    <ClInclude Include="..\tier_bench.hpp" />
+    <ClInclude Include="..\tier_bench_dxil.h" />
     <ClInclude Include="..\..\pyrowave_d3d12.h" />
     <ClInclude Include="..\..\pyrowave_d3d12_internal.hpp" />
   </ItemGroup>
