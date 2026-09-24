@@ -152,8 +152,11 @@ if (${PROJECT_IS_TOP_LEVEL})
 
     set_target_properties(pyrowave-shared
             PROPERTIES VERSION ${PYROWAVE_API_VERSION}
-            SOVERSION ${PYROWAVE_API_VERSION_MAJOR}
-            DLL_NAME_WITH_SOVERSION ON)
+            SOVERSION ${PYROWAVE_API_VERSION_MAJOR})
+
+    if (WIN32)
+        set_target_properties(pyrowave-shared PROPERTIES DLL_NAME_WITH_SOVERSION ON)
+    endif()
 
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/pyrowave.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
     install(TARGETS pyrowave-shared EXPORT pyrowave-sharedConfig
