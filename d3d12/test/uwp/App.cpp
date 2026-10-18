@@ -16,11 +16,14 @@
 #include "vector_test.hpp"
 
 #include <algorithm>
+#include <ctime>
 #include <fstream>
+#include <sstream>
 #include <stdlib.h>
 #include <thread>
 
 #include <dxgi1_4.h>
+#include <expandedresources.h>
 
 #include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
@@ -57,6 +60,50 @@ std::string memory_budget(ID3D12Device *device)
 	return buf;
 }
 
+// Game Mode as the system granted it (expandedresources.h, delay-loaded). On Xbox it is
+// on for the Game app type or the expandedResources capability; these runs check what
+// hevcPlayback does to it. Kept free of C++ objects for __try.
+bool query_expanded_resources(BOOL &expanded, ULONG &cpus)
+{
+	__try
+	{
+		return SUCCEEDED(HasExpandedResources(&expanded)) &&
+		       SUCCEEDED(GetExpandedResourceExclusiveCpuCount(&cpus));
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return false;
+	}
+}
+
+// What this run was set up with, so reports from different capability / Dev Home app
+// type combinations can't be mixed up: the capabilities the installed manifest declares
+// and whether the system granted Game Mode resources. The app can't see the Dev Home
+// app type itself, so note that when saving the report.
+std::string run_setup()
+{
+	std::string report = "Declared capabilities:";
+	std::ifstream manifest(std::wstring(Package::Current().InstalledLocation().Path()) + L"\\AppxManifest.xml");
+	std::stringstream xml;
+	xml << manifest.rdbuf();
+	const std::string text = xml.str();
+	const std::string key = "Capability Name=\"";
+	for (size_t pos = text.find(key); pos != std::string::npos; pos = text.find(key, pos))
+	{
+		pos += key.size();
+		report += " " + text.substr(pos, text.find('"', pos) - pos);
+	}
+	report += "\n";
+
+	BOOL expanded = FALSE;
+	ULONG cpus = 0;
+	if (query_expanded_resources(expanded, cpus))
+		PyroWaveTest::appendf(report, "Expanded resources (Game Mode): %s, exclusive CPU cores: %lu\n", expanded ? "yes" : "no", cpus);
+	else
+		report += "Expanded resources (Game Mode): unavailable\n";
+	return report;
+}
+
 std::string run_tests()
 {
 	using namespace PyroWaveTest;
@@ -89,6 +136,7 @@ std::string run_tests()
 	if (!ctx.init(false, false))
 		return report + "[FAIL] could not create a D3D12 device\n";
 
+	report += run_setup();
 	report += memory_budget(ctx.device.get());
 	report += run_tier_bench(ctx);
 
@@ -138,14 +186,23 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
 		                          L"\\pyrowave_d3d12_test.txt";
 		std::ofstream(path, std::ios::binary) << "running\n";
 
+		// Each run also keeps its own copy, so redeploying for the next case can't lose a
+		// report that hasn't been downloaded yet.
+		wchar_t stamp[32];
+		const time_t now = time(nullptr);
+		wcsftime(stamp, 32, L"%Y%m%d_%H%M%S", localtime(&now));
+		const std::wstring copy = std::wstring(ApplicationData::Current().LocalFolder().Path()) +
+		                          L"\\pyrowave_d3d12_test_" + stamp + L".txt";
+
 		// Loading ~100 MB of vectors and decoding each many times takes a while; keep
 		// the UI thread free so the shell does not consider the app hung.
 		auto dispatcher = window.Dispatcher();
-		worker = std::thread([dispatcher, path]() {
+		worker = std::thread([dispatcher, path, copy]() {
 			_putenv("PYROWAVE_D3D12_PROFILE=1");
 			std::string report = run_tests();
 			OutputDebugStringA(report.c_str());
 			std::ofstream(path, std::ios::binary) << report;
+			std::ofstream(copy, std::ios::binary) << report;
 			dispatcher.RunAsync(CoreDispatcherPriority::Normal, [report]() {
 				MessageDialog dialog(to_hstring(report), L"PyroWave D3D12 test");
 				dialog.ShowAsync();
