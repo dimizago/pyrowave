@@ -1,0 +1,73 @@
+=== PyroWave D3D12 decoder test ===
+Memory budget: 4147 MB (used 1 MB)
+--- GPU partition micro-benchmarks ---
+dependent FMA chain (1 wave): 4.109 ns per FMA = 7.5 cycles at 1.825 GHz (822 us)
+FMA throughput: 5.95 TFLOPS (722 us; Series X peak 12.15)
+read bandwidth: 422 GB/s (636 us; Series X peak 560)
+typed R16 stores (1 texel/lane): 68.86 Gtexel/s (120 us for 3840x2160)
+empty dispatch, no barriers: 0.02 us each
+empty dispatch + UAV barrier: 0.47 us each
+store R16, 1 texel/lane, coalesced rows         80 us  103.11 Gvalue/s    206 GB/s
+store R16, iDWT output pattern                  59 us  140.33 Gvalue/s    281 GB/s
+store RG16, 2 values/lane                       74 us  112.66 Gvalue/s    225 GB/s
+store RGBA16, 4 values/lane                     66 us  125.97 Gvalue/s    252 GB/s
+store raw dword/lane                           114 us   72.73 Gvalue/s    291 GB/s
+store raw dwordx4/lane                         114 us   72.96 Gvalue/s    292 GB/s
+load R16F via GatherRed (4 values/lane)         70 us  118.87 Gvalue/s    238 GB/s
+load RGBA16F texel (4 values/lane)              61 us  136.26 Gvalue/s    273 GB/s
+pyramid: R16F, 4x4 per lane                    223 us   37.26 Gvalue/s     75 GB/s
+pyramid: R16F, 8x8 per instruction              61 us  136.71 Gvalue/s    273 GB/s
+pyramid: RGBA16 texels, 8x8 per instr           54 us  154.94 Gvalue/s    310 GB/s
+pyramid: raw 2 KB tiles, 8 B/lane               56 us  148.91 Gvalue/s    298 GB/s
+pyramid: raw 2 KB tiles, 16 B/lane              55 us  150.10 Gvalue/s    300 GB/s
+pyramid: raw rows, 8 B/lane                     58 us  142.95 Gvalue/s    286 GB/s
+
+##### PYROWAVE_D3D12_FAST=0 #####
+Adapter: SraKmd_arden, output R16_UNORM
+
+--- precision 1 (FP16 storage), tolerance 2 ---
+Decoder kernels: portable.
+[PASS] game_1920x1080_420_120k decode 0.141 ms (median 0.144)  max diff 1, 1.791% px differ, PSNR vs ref 64.3 dB
+    stage medians (us, 56 frames): total 140.5 dequant 7.0 idwt4+dq2 8.7 idwt3+dq1 19.1 idwt2+dq0a 16.2 idwt1+dq0b 41.7 idwt0 42.1 end 5.7
+[PASS] game_3840x2160_420_3m decode 0.506 ms (median 0.518)  max diff 1, 1.518% px differ, PSNR vs ref 65.0 dB
+    (decoded after game_3840x2160_420_460k)
+    stage medians (us, 57 frames): total 515.3 dequant 14.9 idwt4+dq2 24.9 idwt3+dq1 77.8 idwt2+dq0a 63.3 idwt1+dq0b 172.1 idwt0 155.8 end 6.1
+[PASS] game_3840x2160_420_460k decode 0.503 ms (median 0.508)  max diff 1, 1.664% px differ, PSNR vs ref 64.6 dB
+    (decoded after game_3840x2160_420_3m)
+    stage medians (us, 57 frames): total 504.7 dequant 12.9 idwt4+dq2 20.0 idwt3+dq1 71.5 idwt2+dq0a 63.8 idwt1+dq0b 174.3 idwt0 156.1 end 6.1
+[PASS] game_3840x2160_444_3m decode 0.974 ms (median 0.987)  max diff 1, 1.000% px differ, PSNR vs ref 64.9 dB
+    (decoded after game_3840x2160_444_460k)
+    stage medians (us, 57 frames): total 984.0 dequant 15.1 idwt4+dq2 25.2 idwt3+dq1 77.0 idwt2+dq0a 120.6 idwt1+dq0b 286.2 idwt0 454.1 end 5.7
+[PASS] game_3840x2160_444_460k decode 0.962 ms (median 0.976)  max diff 1, 1.089% px differ, PSNR vs ref 64.6 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 972.6 dequant 13.0 idwt4+dq2 20.1 idwt3+dq1 71.2 idwt2+dq0a 121.2 idwt1+dq0b 287.3 idwt0 453.4 end 5.7
+[PASS] synth_3840x2160_444_460k decode 0.967 ms (median 0.981)  max diff 1, 1.744% px differ, PSNR vs ref 64.1 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 977.6 dequant 12.2 idwt4+dq2 21.7 idwt3+dq1 74.8 idwt2+dq0a 121.3 idwt1+dq0b 287.3 idwt0 454.6 end 5.7
+
+Overall: PASS
+
+##### PYROWAVE_D3D12_FAST=1 #####
+Adapter: SraKmd_arden, output R16_UNORM
+
+--- precision 1 (FP16 storage), tolerance 2 ---
+Decoder kernels: 64-lane (SM 6.4).
+[PASS] game_1920x1080_420_120k decode 0.106 ms (median 0.108)  max diff 1, 1.789% px differ, PSNR vs ref 64.3 dB
+    stage medians (us, 56 frames): total 105.7 dequant 9.3 idwt4+dq2 13.4 idwt3+dq1 11.2 idwt2+dq0a 9.5 idwt1+dq0b 26.1 idwt0 29.6 end 6.3
+[PASS] game_3840x2160_420_3m decode 0.366 ms (median 0.372)  max diff 1, 1.261% px differ, PSNR vs ref 65.8 dB
+    (decoded after game_3840x2160_420_460k)
+    stage medians (us, 57 frames): total 369.1 dequant 13.6 idwt4+dq2 18.2 idwt3+dq1 37.9 idwt2+dq0a 46.4 idwt1+dq0b 124.7 idwt0 121.9 end 5.9
+[PASS] game_3840x2160_420_460k decode 0.264 ms (median 0.270)  max diff 1, 1.630% px differ, PSNR vs ref 64.7 dB
+    (decoded after game_3840x2160_420_3m)
+    stage medians (us, 57 frames): total 267.0 dequant 12.4 idwt4+dq2 16.8 idwt3+dq1 17.5 idwt2+dq0a 32.2 idwt1+dq0b 86.1 idwt0 96.4 end 5.7
+[PASS] game_3840x2160_444_3m decode 0.561 ms (median 0.568)  max diff 1, 0.837% px differ, PSNR vs ref 65.7 dB
+    (decoded after game_3840x2160_444_460k)
+    stage medians (us, 57 frames): total 565.1 dequant 14.0 idwt4+dq2 17.8 idwt3+dq1 40.2 idwt2+dq0a 62.8 idwt1+dq0b 117.7 idwt0 306.2 end 5.7
+[PASS] game_3840x2160_444_460k decode 0.448 ms (median 0.456)  max diff 1, 1.077% px differ, PSNR vs ref 64.7 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 453.3 dequant 12.4 idwt4+dq2 16.2 idwt3+dq1 19.4 idwt2+dq0a 32.7 idwt1+dq0b 88.3 idwt0 278.3 end 6.0
+[PASS] synth_3840x2160_444_460k decode 0.451 ms (median 0.480)  max diff 1, 2.190% px differ, PSNR vs ref 64.3 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 477.7 dequant 12.5 idwt4+dq2 19.7 idwt3+dq1 19.4 idwt2+dq0a 33.1 idwt1+dq0b 92.5 idwt0 287.1 end 5.5
+
+Overall: PASS

@@ -15,7 +15,7 @@ The dequantizer and inverse DWT in `shaders/xbox` are hand-written for the moonl
 
 ### Why they exist
 
-To switch the TV to HDR10, moonlight-xbox must declare the `hevcPlayback` restricted capability. That makes it a "4K media app", which runs in a reduced GPU partition no matter what app type Dev Home is set to. Measured in that partition on a Series X (`test/tier_bench`):
+To switch the TV to HDR10, moonlight-xbox must declare the `hevcPlayback` restricted capability. That makes it a "4K media app", which runs in a reduced GPU partition no matter what app type Dev Home is set to (unless it also declares `expandedResources`; see "Which tier an app gets" below). Measured in that partition on a Series X (`test/tier_bench`):
 
 | resource | measured in the partition | Series X peak |
 |---|---|---|
@@ -56,7 +56,7 @@ They run only at precision 1 (moonlight-xbox's default), on devices whose waves 
 
 All times use 16-bit output planes as in moonlight-xbox. "Translated" and "Xbox" are the two sets of kernels in the same build.
 
-| frame | media-app partition (`hevcPlayback`): translated | media-app partition: **Xbox** | full Game-tier GPU: translated | full Game-tier GPU: **Xbox** |
+| frame | media-app partition (`hevcPlayback`): translated | media-app partition: **Xbox** | Game tier: translated | Game tier: **Xbox** |
 |---|---|---|---|---|
 | 4K 4:4:4, 460 KB | 4.49 ms | **1.78 ms** | 0.98 ms | **0.46 ms** |
 | 4K 4:4:4, 3 MB | 4.51 ms | **2.29 ms** | 0.99 ms | **0.57 ms** |
@@ -143,4 +143,21 @@ pyrowave-d3d12-vector-test --r16 --precision 1 --baseline-quality baseline vecto
 pyrowave-d3d12-vector-test --tier-bench vectors\*.pwtv
 ```
 
-On the console, `test/uwp` is a UWP test app that declares `hevcPlayback` like moonlight-xbox. It replays the vectors in `test/uwp/vectors` with both sets of kernels and writes its report to `LocalState\pyrowave_d3d12_test.txt`. Swapping the capability for `expandedResources` gives it the Game-tier GPU instead.
+On the console, `test/uwp` is a UWP test app that declares `hevcPlayback` like moonlight-xbox. It replays the vectors in `test/uwp/vectors` with both sets of kernels and writes its report to `LocalState\pyrowave_d3d12_test.txt` (plus a timestamped copy). The report lists the declared capabilities and whether the system granted Game Mode (`HasExpandedResources`).
+
+### Which tier an app gets
+
+Measured on a Series X, OS 10.0.26100.9445 (reports in `test/uwp/reports`):
+
+| capabilities | Dev Home app type | Game Mode | memory budget | FP32 FMA | read bandwidth |
+|---|---|---|---|---|---|
+| `hevcPlayback` | App | no | 2856 MB | 0.97 TFLOPS | 114 GB/s |
+| `hevcPlayback` | Game | no | 2856 MB | 0.97 TFLOPS | 114 GB/s |
+| none | Game | yes | 4147 MB | 5.95 TFLOPS | 426 GB/s |
+| `expandedResources` | App | yes | 4147 MB | 5.95 TFLOPS | 275–426 GB/s |
+| `hevcPlayback` + `expandedResources` | Game | yes | 4147 MB | 5.96 TFLOPS | 429 GB/s |
+
+- `hevcPlayback` without `expandedResources` keeps an app in the media-app partition, even with the Game app type.
+- `expandedResources` puts it in Game Mode whatever the app type, and with `hevcPlayback` too. That is what the Game tier columns above measure: about half of the console's ALU, not all of it.
+- Both tiers reserve 6 CPU cores for the app.
+- These runs only measure the GPU. They do not cover HDR output, presentation or the hardware HEVC decoder in Game Mode.

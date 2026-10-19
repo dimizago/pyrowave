@@ -1,0 +1,55 @@
+=== PyroWave D3D12 decoder test ===
+Declared capabilities: hevcPlayback
+Expanded resources (Game Mode): no, exclusive CPU cores: 6
+Memory budget: 2856 MB (used 2 MB)
+(tier bench skipped in this diagnostic build)
+
+##### PYROWAVE_D3D12_XBOX_KERNELS=1 #####
+Adapter: SraKmd_arden, output R16_UNORM
+
+--- precision 1 (FP16 storage), tolerance 2 ---
+Decoder kernels: Xbox (SM 6.4).
+[PASS] game_1920x1080_420_120k decode 0.488 ms (median 0.504)  max diff 1, 1.789% px differ, PSNR vs ref 64.3 dB
+    stage medians (us, 56 frames): total 490.5 dequant 43.0 idwt4+dq2 58.5 idwt3+dq1 53.7 idwt2+dq0a 56.7 idwt1+dq0b 127.4 idwt0 129.8 end 21.1
+[PASS] game_3840x2160_420_3m decode 1.482 ms (median 1.495)  max diff 1, 1.261% px differ, PSNR vs ref 65.8 dB
+    (decoded after game_3840x2160_420_460k)
+    stage medians (us, 57 frames): total 1481.0 dequant 59.8 idwt4+dq2 84.7 idwt3+dq1 185.4 idwt2+dq0a 174.5 idwt1+dq0b 480.0 idwt0 476.9 end 20.3
+[PASS] game_3840x2160_420_460k decode 1.040 ms (median 1.057)  max diff 1, 1.630% px differ, PSNR vs ref 64.7 dB
+    (decoded after game_3840x2160_420_3m)
+    stage medians (us, 57 frames): total 1043.6 dequant 46.7 idwt4+dq2 58.4 idwt3+dq1 80.8 idwt2+dq0a 115.7 idwt1+dq0b 342.7 idwt0 378.9 end 19.6
+[PASS] game_3840x2160_444_3m decode 2.258 ms (median 2.279)  max diff 1, 0.837% px differ, PSNR vs ref 65.7 dB
+    (decoded after game_3840x2160_444_460k)
+    stage medians (us, 57 frames): total 2266.1 dequant 61.7 idwt4+dq2 83.9 idwt3+dq1 193.5 idwt2+dq0a 253.2 idwt1+dq0b 452.0 idwt0 1204.8 end 19.5
+[PASS] game_3840x2160_444_460k decode 1.751 ms (median 1.767)  max diff 1, 1.077% px differ, PSNR vs ref 64.7 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 1753.8 dequant 47.4 idwt4+dq2 58.8 idwt3+dq1 87.7 idwt2+dq0a 120.1 idwt1+dq0b 363.4 idwt0 1058.4 end 19.5
+[PASS] synth_3840x2160_444_460k decode 1.734 ms (median 1.749)  max diff 1, 2.190% px differ, PSNR vs ref 64.3 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 1735.9 dequant 49.5 idwt4+dq2 59.8 idwt3+dq1 84.3 idwt2+dq0a 114.9 idwt1+dq0b 357.3 idwt0 1051.9 end 19.5
+
+Overall: PASS
+
+##### PYROWAVE_D3D12_XBOX_KERNELS=0 #####
+Adapter: SraKmd_arden, output R16_UNORM
+
+--- precision 1 (FP16 storage), tolerance 2 ---
+Decoder kernels: portable.
+[PASS] game_1920x1080_420_120k decode 0.651 ms (median 0.666)  max diff 1, 1.791% px differ, PSNR vs ref 64.3 dB
+    stage medians (us, 56 frames): total 653.0 dequant 34.4 idwt4+dq2 45.8 idwt3+dq1 115.3 idwt2+dq0a 84.2 idwt1+dq0b 199.8 idwt0 155.2 end 18.5
+[PASS] game_3840x2160_420_3m decode 2.310 ms (median 2.333)  max diff 1, 1.518% px differ, PSNR vs ref 65.0 dB
+    (decoded after game_3840x2160_420_460k)
+    stage medians (us, 57 frames): total 2319.6 dequant 72.5 idwt4+dq2 132.1 idwt3+dq1 446.3 idwt2+dq0a 294.3 idwt1+dq0b 758.8 idwt0 599.9 end 19.7
+[PASS] game_3840x2160_420_460k decode 2.283 ms (median 2.304)  max diff 1, 1.664% px differ, PSNR vs ref 64.6 dB
+    (decoded after game_3840x2160_420_3m)
+    stage medians (us, 57 frames): total 2291.7 dequant 62.8 idwt4+dq2 118.8 idwt3+dq1 420.4 idwt2+dq0a 299.3 idwt1+dq0b 768.0 idwt0 600.0 end 19.7
+[PASS] game_3840x2160_444_3m decode 4.413 ms (median 4.486)  max diff 1, 1.000% px differ, PSNR vs ref 64.9 dB
+    (decoded after game_3840x2160_444_460k)
+    stage medians (us, 57 frames): total 4470.3 dequant 72.3 idwt4+dq2 133.0 idwt3+dq1 443.6 idwt2+dq0a 645.3 idwt1+dq0b 1466.4 idwt0 1689.3 end 18.1
+[PASS] game_3840x2160_444_460k decode 4.373 ms (median 4.461)  max diff 1, 1.089% px differ, PSNR vs ref 64.6 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 4448.6 dequant 61.7 idwt4+dq2 119.9 idwt3+dq1 421.6 idwt2+dq0a 652.2 idwt1+dq0b 1469.5 idwt0 1705.2 end 18.3
+[PASS] synth_3840x2160_444_460k decode 4.385 ms (median 4.460)  max diff 1, 1.744% px differ, PSNR vs ref 64.1 dB
+    (decoded after game_3840x2160_444_3m)
+    stage medians (us, 57 frames): total 4446.5 dequant 59.3 idwt4+dq2 124.1 idwt3+dq1 431.0 idwt2+dq0a 654.7 idwt1+dq0b 1472.4 idwt0 1691.1 end 18.1
+
+Overall: PASS

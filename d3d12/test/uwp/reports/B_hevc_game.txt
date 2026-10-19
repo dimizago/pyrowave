@@ -1,0 +1,45 @@
+=== PyroWave D3D12 decoder test ===
+Declared capabilities: hevcPlayback
+Expanded resources (Game Mode): no, exclusive CPU cores: 6
+Memory budget: 2856 MB (used 2 MB)
+--- GPU partition micro-benchmarks ---
+dependent FMA chain (1 wave): 25.086 ns per FMA = 45.8 cycles at 1.825 GHz (5017 us)
+FMA throughput: 0.97 TFLOPS (4422 us; Series X peak 12.15)
+read bandwidth: 114 GB/s (2362 us; Series X peak 560)
+typed R16 stores (1 texel/lane): 12.94 Gtexel/s (641 us for 3840x2160)
+empty dispatch, no barriers: 0.09 us each
+empty dispatch + UAV barrier: 2.81 us each
+store R16, 1 texel/lane, coalesced rows        324 us   25.61 Gvalue/s     51 GB/s
+store R16, iDWT output pattern                 193 us   42.90 Gvalue/s     86 GB/s
+store RG16, 2 values/lane                      332 us   24.96 Gvalue/s     50 GB/s
+store RGBA16, 4 values/lane                    194 us   42.65 Gvalue/s     85 GB/s
+store raw dword/lane                           288 us   28.75 Gvalue/s    115 GB/s
+store raw dwordx4/lane                         285 us   29.06 Gvalue/s    116 GB/s
+load R16F via GatherRed (4 values/lane)        187 us   44.32 Gvalue/s     89 GB/s
+load RGBA16F texel (4 values/lane)             166 us   49.92 Gvalue/s    100 GB/s
+pyramid: R16F, 4x4 per lane                   1343 us    6.18 Gvalue/s     12 GB/s
+pyramid: R16F, 8x8 per instruction             157 us   52.90 Gvalue/s    106 GB/s
+pyramid: RGBA16 texels, 8x8 per instr          152 us   54.42 Gvalue/s    109 GB/s
+pyramid: raw 2 KB tiles, 8 B/lane              146 us   57.00 Gvalue/s    114 GB/s
+pyramid: raw 2 KB tiles, 16 B/lane             141 us   58.84 Gvalue/s    118 GB/s
+pyramid: raw rows, 8 B/lane                    180 us   45.99 Gvalue/s     92 GB/s
+
+##### PYROWAVE_D3D12_XBOX_KERNELS=0 #####
+Adapter: SraKmd_arden, output R16_UNORM
+
+--- precision 1 (FP16 storage), tolerance 2 ---
+Decoder kernels: portable.
+[FAIL] game_1920x1080_420_120k: device removed (hr 0x887a0006)
+[FAIL] game_3840x2160_420_3m: pyrowave_d3d12_decoder_create: out of device memory
+[FAIL] game_3840x2160_420_460k: pyrowave_d3d12_decoder_create: out of device memory
+[FAIL] game_3840x2160_444_3m: pyrowave_d3d12_decoder_create: out of device memory
+[FAIL] game_3840x2160_444_460k: pyrowave_d3d12_decoder_create: out of device memory
+[FAIL] synth_3840x2160_444_460k: pyrowave_d3d12_decoder_create: out of device memory
+
+Overall: FAIL
+
+##### PYROWAVE_D3D12_XBOX_KERNELS=1 #####
+Adapter: SraKmd_arden, output R16_UNORM
+[FAIL] pyrowave_d3d12_device_create(precision 1): generic error
+
+Overall: FAIL

@@ -61,8 +61,9 @@ std::string memory_budget(ID3D12Device *device)
 }
 
 // Game Mode as the system granted it (expandedresources.h, delay-loaded). On Xbox it is
-// on for the Game app type or the expandedResources capability; these runs check what
-// hevcPlayback does to it. Kept free of C++ objects for __try.
+// on for the Game app type or the expandedResources capability, except that hevcPlayback
+// without expandedResources keeps the app out of it whatever the app type (reports/).
+// Kept free of C++ objects for __try.
 bool query_expanded_resources(BOOL &expanded, ULONG &cpus)
 {
 	__try
@@ -138,7 +139,6 @@ std::string run_tests()
 
 	report += run_setup();
 	report += memory_budget(ctx.device.get());
-	report += run_tier_bench(ctx);
 
 	g_output_format = DXGI_FORMAT_R16_UNORM;
 	g_precisions = { 1 };
@@ -150,6 +150,11 @@ std::string run_tests()
 		appendf(report, "\n##### %s #####\n", kernels);
 		report += run_suite(ctx, vectors, 60, pass);
 	}
+
+	// Last: in the hevcPlayback partition the device is removed (DXGI_ERROR_DEVICE_HUNG)
+	// on the first submission after the micro-benchmarks, so they must not run first.
+	report += "\n";
+	report += run_tier_bench(ctx);
 	return report;
 }
 }

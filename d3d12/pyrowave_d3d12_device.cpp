@@ -135,7 +135,7 @@ bool create_pipeline(pyrowave_d3d12_device device, const void *code, size_t size
 // ALU, and roughly 5x the latency, and the cost of a typed store depends mostly on how
 // compact each instruction's 64 texels are. The translated kernels took 4.5 ms for a
 // 4K 4:4:4 frame at streaming rates there; these take 1.8 ms (0.98 -> 0.46 ms with the
-// full Game-tier GPU).
+// Game tier, which an app gets with expandedResources).
 //
 // They are not a general improvement: on a desktop RDNA3 GPU they measured no faster
 // (slower at 1080p), and GPUs without 64-lane waves cannot run them. So they are the
